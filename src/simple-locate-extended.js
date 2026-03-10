@@ -296,18 +296,9 @@
         },
 
         /**
-         * Circle watcher'ı aç/kapat
+         * Circle watcher'ı aç/kapat (artık kullanılmıyor, geriye uyumluluk için korundu)
          */
         enableCircleWatcher: function (enabled) {
-            enabled = !!enabled;
-            this.options.enableCircleWatcher = enabled;
-
-            if (enabled && typeof this._startCircleStyleWatcher === 'function') {
-                this._startCircleStyleWatcher();
-            } else if (!enabled && typeof this._stopCircleStyleWatcher === 'function') {
-                this._stopCircleStyleWatcher();
-            }
-
             return this;
         },
 
@@ -349,17 +340,6 @@
             var self = this;
 
             // Basit prompt-based ayarlar
-            var threshold = prompt(
-                'Marker görünürlük eşiği (m):',
-                this.options.markerVisibilityThreshold || 30
-            );
-            if (threshold !== null) {
-                var v = parseFloat(threshold);
-                if (!isNaN(v) && v > 0) {
-                    this.options.markerVisibilityThreshold = v;
-                }
-            }
-
             var maxAcc = prompt(
                 'Maksimum kabul edilebilir accuracy (m):',
                 this.options.maxAcceptableAccuracy || 100

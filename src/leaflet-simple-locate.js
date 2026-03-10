@@ -240,8 +240,10 @@
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
             pdrStepLength: 0.65,            // Ortalama adım uzunluğu (metre)
-            pdrStepThreshold: 1.2,          // Adım tespiti için ivme eşiği (g kuvveti)
-            pdrStepCooldown: 250,           // İki adım arası minimum süre (ms) - çift sayımı engeller
+            pdrStepThreshold: 1.2,          // Adım tespiti için ivme eşiği (g kuvveti) - adaptive threshold baz değeri
+            pdrStepCooldown: 400,           // İki adım arası minimum süre (ms)
+            pdrMinPeakValue: 0.8,           // Zirvenin minimum büyüklüğü (çok küçük zirveleri reddet)
+            pdrAdaptiveThreshold: true,     // Dinamik eşik kullan
             pdrMaxDuration: 60000,          // PDR maksimum aktif süresi (ms) - 60 saniye
             pdrMaxSteps: 100,               // PDR ile maksimum adım sayısı
             pdrAccuracyDecay: 0.5,          // Her adımda accuracy ne kadar artar (metre)
@@ -365,7 +367,7 @@
             this._button = undefined;
             this._marker = undefined;
             this._circle = undefined;
-            this._circleStyleInterval = undefined; // RADİKAL: Sürekli stil kontrolü için
+            this._circleStyleInterval = undefined;
 
             // button state
             this._clicked = undefined;
@@ -488,20 +490,26 @@
             
             // ========== PEDESTRIAN DEAD RECKONING (PDR) STATE ==========
             this._pdr = {
-                active: false,              // PDR şu an aktif mi
-                startTime: null,            // PDR'ın başladığı zaman
-                stepCount: 0,               // Algılanan adım sayısı
-                lastStepTime: 0,            // Son adımın zamanı
-                baseLatitude: null,          // PDR başlangıç enlemi
-                baseLongitude: null,         // PDR başlangıç boylamı
-                currentLatitude: null,       // PDR ile tahmin edilen enlem
-                currentLongitude: null,      // PDR ile tahmin edilen boylam
-                currentAccuracy: null,       // PDR tahmini accuracy (giderek artar)
-                lastAccMagnitude: 0,         // Son ivme büyüklüğü
-                isStepPhase: false,          // Adım döngüsünde zirve geçildi mi
-                motionHandler: null,         // DeviceMotion event handler referansı
-                accBuffer: [],              // İvme verisi buffer'ı (smoothing için)
-                accBufferSize: 4            // Buffer boyutu
+                active: false,
+                startTime: null,
+                stepCount: 0,
+                lastStepTime: 0,
+                baseLatitude: null,
+                baseLongitude: null,
+                currentLatitude: null,
+                currentLongitude: null,
+                currentAccuracy: null,
+                lastAccMagnitude: 0,
+                isStepPhase: false,
+                motionHandler: null,
+                accBuffer: [],
+                accBufferSize: 12,
+                // Tam dalga formu doğrulama
+                peakValue: 0,
+                valleyDetected: false,
+                // Adaptive threshold
+                recentPeaks: [],
+                dynamicThreshold: 0
             };
         },
         
@@ -1581,8 +1589,6 @@
         },
 
         _unwatchGeolocation: function () {
-            // RADİKAL: Stil kontrolünü durdur
-            this._stopCircleStyleWatcher();
             
             this._map.stopLocate();
             this._map.off("locationfound", this._onLocationFound, this);
@@ -1668,67 +1674,31 @@
             }
             
             // ========== EK GÜVENLİK: FİLTRELENMİŞ KONUM İÇİN DE GEOFENCE KONTROLÜ ==========
-            // Bu, filtreleme sonrası konumun hala alan içinde olduğundan emin olur
             const finalGeofenceCheck = this._isInsideGeofence(filteredPosition.latitude, filteredPosition.longitude);
             if (!finalGeofenceCheck.inside) {
-                // Filtrelenmiş konum hala alan dışında
                 this._locationStats.geofenceRejections++;
                 
-                // Konum bilgilerini kaydet (circle için)
-                this._latitude = filteredPosition.latitude;
-                this._longitude = filteredPosition.longitude;
-                this._accuracy = filteredPosition.accuracy;
-                
-                // Marker gizle, circle'ı gri göster
-                if (this._marker) {
-                    this._map.removeLayer(this._marker);
-                    this._marker = undefined;
+                // Dead reckoning başlat (aktif değilse)
+                if (this.options.enableDeadReckoning && !this._pdr.active) {
+                    this._startDeadReckoning();
                 }
                 
-                // Circle'ı gri renkte göster (alan dışı göstergesi)
-                if (this.options.drawCircle && this._accuracy) {
-                    if (this._circle) {
-                        this._circle.setLatLng([this._latitude, this._longitude]);
-                        this._circle.setRadius(this._accuracy);
-                        this._circle.setStyle({
-                            fillColor: '#9E9E9E',
-                            color: '#9E9E9E',
-                            fillOpacity: 0.1,
-                            opacity: 0.4,
-                            weight: 2,
-                            dashArray: '8 4'
-                        });
-                    } else {
-                        this._circle = L.circle([this._latitude, this._longitude], {
-                            radius: this._accuracy,
-                            fillColor: '#9E9E9E',
-                            color: '#9E9E9E',
-                            fillOpacity: 0.1,
-                            opacity: 0.4,
-                            weight: 2,
-                            dashArray: '8 4'
-                        }).addTo(this._map);
-                    }
+                // PDR aktifse PDR konumunu kullan
+                if (this._pdr.active) {
+                    this._latitude = this._pdr.currentLatitude;
+                    this._longitude = this._pdr.currentLongitude;
+                    this._accuracy = this._pdr.currentAccuracy;
+                } else if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
+                    // Son iyi iç mekan konumunu koru (güncelleme yapma)
+                    this._latitude = this._lastGoodLocation.latitude;
+                    this._longitude = this._lastGoodLocation.longitude;
+                    this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
+                } else {
+                    // Hiç iyi konum yoksa güncelleme yapma
+                    return;
                 }
                 
-                // Callback'i çağır
-                if (this.options.afterDeviceMove) {
-                    this.options.afterDeviceMove({
-                        lat: this._latitude,
-                        lng: this._longitude,
-                        accuracy: this._accuracy,
-                        angle: this._angle,
-                        isFiltered: true,
-                        isRejected: true,
-                        isJump: false,
-                        filterStats: this._weiYeState.filteringStats,
-                        confidence: 0,
-                        locationStats: this._locationStats,
-                        isFallback: false,
-                        isIndoorMode: this.options.indoorMode,
-                        consecutiveBadLocations: this._consecutiveBadLocations
-                    });
-                }
+                this._updateMarker();
                 return;
             }
 
@@ -2162,6 +2132,10 @@
             this._pdr.lastAccMagnitude = 0;
             this._pdr.isStepPhase = false;
             this._pdr.accBuffer = [];
+            this._pdr.peakValue = 0;
+            this._pdr.valleyDetected = false;
+            this._pdr.recentPeaks = [];
+            this._pdr.dynamicThreshold = this.options.pdrStepThreshold;
             
             // DeviceMotion dinlemeye başla
             var self = this;
@@ -2206,7 +2180,6 @@
         _onDeviceMotion: function (event) {
             if (!this._pdr.active) return;
             
-            // Zaman/adım limiti kontrolü (0 veya Infinity = limitsiz)
             var now = Date.now();
             if (this.options.pdrMaxDuration > 0 && this.options.pdrMaxDuration !== Infinity &&
                 now - this._pdr.startTime > this.options.pdrMaxDuration) {
@@ -2219,18 +2192,19 @@
                 return;
             }
             
-            // İvmeölçer verisini al
             var acc = event.accelerationIncludingGravity;
             if (!acc || acc.x === null) return;
             
-            // İvme büyüklüğü (toplam kuvvet vektörü)
             var magnitude = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
             
-            // Buffer'a ekle (gürültü azaltma)
+            // Buffer'a ekle (12 sample ~ 120-200ms smoothing)
             this._pdr.accBuffer.push(magnitude);
             if (this._pdr.accBuffer.length > this._pdr.accBufferSize) {
                 this._pdr.accBuffer.shift();
             }
+            
+            // Buffer dolmadan işlem yapma (ilk anlık gürültüyü atla)
+            if (this._pdr.accBuffer.length < this._pdr.accBufferSize) return;
             
             // Buffer ortalaması
             var avgMag = 0;
@@ -2239,26 +2213,82 @@
             }
             avgMag /= this._pdr.accBuffer.length;
             
-            // Normalize: g kuvvetini çıkar (~9.81), sadece hareket ivmesine bak
             var g = 9.81;
             var delta = Math.abs(avgMag - g);
             
-            // ═══ ADIM TESPİT ALGORİTMASI (zirve tespiti) ═══
-            // İnsan yürüyüşünde her adımda ivme bir zirve yapar.
-            // Eşik geçilince "zirve fazı"na gir, eşiğin altına düşünce "adım sayılır"
-            var threshold = this.options.pdrStepThreshold;
+            // ═══ ADIM TESPİT: TAM DALGA FORMU + ADAPTİVE THRESHOLD ═══
+            //
+            // Gerçek bir adım sinyali: yükseliş → ZİRVE → düşüş → VADİ → tekrar
+            // Adım ancak hem zirve hem vadi gözlendiğinde sayılır.
+            //
+            // Fazlar:
+            //   !isStepPhase: ivme düşük, zirve bekleniyor
+            //   isStepPhase + !valleyDetected: zirve geçildi, vadiye düşmesi bekleniyor
+            //   isStepPhase + valleyDetected: tam dalga tamamlandı → adım say
+            
+            var threshold = this._pdr.dynamicThreshold || this.options.pdrStepThreshold;
+            var prevDelta = this._pdr.lastAccMagnitude;
             
             if (!this._pdr.isStepPhase && delta > threshold) {
                 // Eşik aşıldı → zirve fazına gir
                 this._pdr.isStepPhase = true;
-            } else if (this._pdr.isStepPhase && delta < threshold * 0.6) {
-                // Eşiğin altına düştü → bir adım tamamlandı
-                this._pdr.isStepPhase = false;
+                this._pdr.peakValue = delta;
+                this._pdr.valleyDetected = false;
                 
-                // Cooldown kontrolü (çift sayımı engelle)
-                if (now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
-                    this._pdr.lastStepTime = now;
-                    this._onStepDetected();
+            } else if (this._pdr.isStepPhase) {
+                // Zirve fazındayız — zirve değerini takip et
+                if (delta > this._pdr.peakValue) {
+                    this._pdr.peakValue = delta;
+                }
+                
+                // Vadi tespiti: sinyal eşiğin %40'ının altına düştüyse vadi geçildi
+                if (!this._pdr.valleyDetected && delta < threshold * 0.4) {
+                    this._pdr.valleyDetected = true;
+                }
+                
+                // Sinyal tekrar yükselmeye başladı VE vadi geçildi → tam dalga = 1 adım
+                if (this._pdr.valleyDetected && delta > prevDelta && delta > threshold * 0.5) {
+                    // Zirve büyüklüğü yeterli mi?
+                    if (this._pdr.peakValue >= this.options.pdrMinPeakValue) {
+                        // Cooldown kontrolü
+                        if (now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
+                            this._pdr.lastStepTime = now;
+                            
+                            // Adaptive threshold: son zirve değerlerinin ortalamasına göre eşiği ayarla
+                            if (this.options.pdrAdaptiveThreshold) {
+                                this._pdr.recentPeaks.push(this._pdr.peakValue);
+                                if (this._pdr.recentPeaks.length > 8) {
+                                    this._pdr.recentPeaks.shift();
+                                }
+                                if (this._pdr.recentPeaks.length >= 3) {
+                                    var peakSum = 0;
+                                    for (var p = 0; p < this._pdr.recentPeaks.length; p++) {
+                                        peakSum += this._pdr.recentPeaks[p];
+                                    }
+                                    var peakAvg = peakSum / this._pdr.recentPeaks.length;
+                                    // Eşik = ortalama zirvenin %40'ı, ama baz eşiğin altına düşmesin
+                                    this._pdr.dynamicThreshold = Math.max(
+                                        this.options.pdrStepThreshold * 0.6,
+                                        peakAvg * 0.4
+                                    );
+                                }
+                            }
+                            
+                            this._onStepDetected();
+                        }
+                    }
+                    
+                    // Fazı sıfırla (adım sayılsın veya sayılmasın)
+                    this._pdr.isStepPhase = false;
+                    this._pdr.peakValue = 0;
+                    this._pdr.valleyDetected = false;
+                }
+                
+                // Güvenlik: çok uzun süredir zirve fazında kalındıysa sıfırla (sahte sinyal)
+                if (this._pdr.isStepPhase && now - this._pdr.lastStepTime > 2000 && this._pdr.lastStepTime > 0) {
+                    this._pdr.isStepPhase = false;
+                    this._pdr.peakValue = 0;
+                    this._pdr.valleyDetected = false;
                 }
             }
             
@@ -2431,18 +2461,14 @@
             // ========== EK GÜVENLİK: MARKER GÜNCELLENİRKEN DE GEOFENCE KONTROLÜ ==========
             const markerGeofenceCheck = this._isInsideGeofence(this._latitude, this._longitude);
             if (!markerGeofenceCheck.inside) {
-                // Marker konumu yeni alan dışında - gizleniyor
-                // Marker'ı gizle
-                if (this._marker) {
-                    this._map.removeLayer(this._marker);
-                    this._marker = undefined;
+                // Geofence dışı - son iyi konumu koruyarak güncellemeyi atla
+                if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
+                    this._latitude = this._lastGoodLocation.latitude;
+                    this._longitude = this._lastGoodLocation.longitude;
+                    this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
+                } else {
+                    return;
                 }
-                // Circle varsa kaldır (alan dışı circle gösterimi devre dışı)
-                if (this._circle) {
-                    this._map.removeLayer(this._circle);
-                    this._circle = undefined;
-                }
-                return;
             }
 
             let icon_name;
@@ -2452,178 +2478,45 @@
                 return;
             }
 
-            // Dinamik eşik: Accuracy eşiğin üzerindeyse, sadece soluk konum dairesini göster, işaretçiyi gizle
-            const threshold = this.options.markerVisibilityThreshold || 30;
-            const isLowAccuracy = this._accuracy > threshold;
+            // Accuracy circle güncelle
+            const accuracyColor = this._getAccuracyColor(this._accuracy);
 
-            // Doğruluk dairesini her zaman güncelle - RADİKAL ÇÖZÜM
             if (this._circle) {
                 this._circle.setLatLng([this._latitude, this._longitude]);
                 this._circle.setRadius(this._accuracy);
-
-                // Doğruluk düzeyine göre dairenin stilini ayarla
-                const accuracyColor = this._getAccuracyColor(this._accuracy);
-
-                // Düşük doğrulukta kesikli çizgi (accuracy > 5m)
-                if (isLowAccuracy) {
-                    this._circle.setStyle({
-                        fillColor: accuracyColor,
-                        color: accuracyColor,
-                        fillOpacity: 0.1,   // Daha soluk fill
-                        opacity: 0.3,       // Daha soluk stroke
-                        weight: 2,
-                        dashArray: '10 6'
-                    });
-                    
-                    // RADİKAL: Her update'te dashArray'i zorla uygula
-                    this._forceCircleDashArray(isLowAccuracy);
-                } else {
-                    // Yüksek doğrulukta düz çizgi (accuracy ≤ 5m)
-                    this._circle.setStyle({
-                        fillColor: accuracyColor,
-                        color: accuracyColor,
-                        fillOpacity: 0.2,
-                        opacity: 0.8,       // Daha belirgin stroke
-                        weight: 1,
-                        dashArray: ''
-                    });
-                    
-                    // RADİKAL: Düz çizgi için dashArray'i temizle
-                    this._forceCircleDashArray(false);
-                }
-
-                // Sıçrama tespit edildiyse ve doğruluk düşük değilse visual feedback
-                if (this._weiYeState.isJumpDetected && !isLowAccuracy) {
-                    this._circle.setStyle({
-                        dashArray: "8 4",
-                        fillOpacity: 0.3,
-                        opacity: 0.9
-                    });
-
-                    // Birkaç saniye sonra normale döndür
-                    setTimeout(() => {
-                        if (this._circle) {
-                            this._circle.setStyle({
-                                dashArray: isLowAccuracy ? "10 6" : "",
-                                fillOpacity: isLowAccuracy ? 0.15 : 0.2,
-                                opacity: isLowAccuracy ? 0.8 : 0.5
-                            });
-                            this._forceCircleDashArray(isLowAccuracy);
-                        }
-                    }, 2000);
-                }
-
+                this._circle.setStyle({
+                    fillColor: accuracyColor,
+                    color: accuracyColor,
+                    fillOpacity: 0.2,
+                    opacity: 0.5,
+                    weight: 1,
+                    dashArray: ''
+                });
             } else if (this.options.drawCircle) {
-                // İlk kez daire oluşturma
-                const accuracyColor = this._getAccuracyColor(this._accuracy);
                 this._circle = L.circle([this._latitude, this._longitude], {
                     radius: this._accuracy,
                     fillColor: accuracyColor,
                     color: accuracyColor,
-                    fillOpacity: isLowAccuracy ? 0.1 : 0.2,   // Kesikli daha soluk fill
-                    opacity: isLowAccuracy ? 0.3 : 0.8,       // Kesikli soluk, düz belirgin
-                    weight: isLowAccuracy ? 2 : 1,
-                    dashArray: isLowAccuracy ? '10 6' : ''
+                    fillOpacity: 0.2,
+                    opacity: 0.5,
+                    weight: 1,
+                    dashArray: ''
                 }).addTo(this._map);
-                
-                // RADİKAL: Circle eklendikten hemen sonra dashArray'i zorla
-                setTimeout(() => {
-                    this._forceCircleDashArray(isLowAccuracy);
-                    // RADİKAL: Sürekli kontrol eden mekanizmayı başlat
-                    this._startCircleStyleWatcher();
-                }, 10);
-                
-                // RADİKAL: Harita her hareket ettiğinde veya zoom değiştiğinde yeniden uygula
-                this._map.on('moveend zoomend', () => {
-                    if (this._circle && this._accuracy > 15) {  // TEST: 15m eşiği
-                        this._forceCircleDashArray(true);
-                    }
+            }
+
+            // Konum marker'ını her zaman göster ve güncelle
+            if (this._marker && this._marker.icon_name === icon_name) {
+                this._marker.setLatLng([this._latitude, this._longitude]);
+            } else {
+                if (this._marker) this._map.removeLayer(this._marker);
+                this._marker = L.marker([this._latitude, this._longitude], {
+                    icon: this.options[icon_name]
                 });
+                this._marker.icon_name = icon_name;
+                this._marker.addTo(this._map);
             }
 
-            // Konum marker'ını güncelle veya göster/gizle
-            if (isLowAccuracy) {
-                // Accuracy > 15m ise marker'ı gizle (varsa)
-                if (this._marker) {
-                    this._map.removeLayer(this._marker);
-                    this._marker = undefined;
-                }
-            } else {
-                // Accuracy ≤ 15m ise marker'ı göster ve güncelle
-                if (this._marker && this._marker.icon_name === icon_name) {
-                    this._marker.setLatLng([this._latitude, this._longitude]);
-                } else {
-                    if (this._marker) this._map.removeLayer(this._marker);
-                    this._marker = L.marker([this._latitude, this._longitude], {
-                        icon: this.options[icon_name]
-                    });
-                    this._marker.icon_name = icon_name;
-                    this._marker.addTo(this._map);
-                }
-            }
-
-            // Doğruluk bilgisini güncelle - opsiyonel
             this._lastAccuracy = this._accuracy;
-        },
-
-        // RADİKAL: Circle'a kesikli çizgiyi zorla uygula
-        _forceCircleDashArray: function(isDashed) {
-            if (!this._circle || !this._circle._path) return;
-            
-            const path = this._circle._path;
-            
-            if (isDashed) {
-                // Kesikli çizgi - soluk siyah
-                path.style.strokeDasharray = '10, 6';
-                path.setAttribute('stroke-dasharray', '10, 6');
-                path.style.strokeWidth = '2';
-                path.setAttribute('stroke-width', '2');
-                path.style.strokeOpacity = '0.3';  // Daha soluk
-                path.setAttribute('stroke-opacity', '0.3');
-                
-            } else {
-                // Düz çizgi - normal siyah
-                path.style.strokeDasharray = '';
-                path.setAttribute('stroke-dasharray', '');
-                path.style.strokeWidth = '1';
-                path.setAttribute('stroke-width', '1');
-                path.style.strokeOpacity = '0.8';  // Daha belirgin
-                path.setAttribute('stroke-opacity', '0.8');
-                
-            }
-        },
-        
-        // RADİKAL: Sürekli stil kontrolü başlat
-        _startCircleStyleWatcher: function() {
-            // Eski interval varsa temizle
-            if (this._circleStyleInterval) {
-                clearInterval(this._circleStyleInterval);
-            }
-            
-            // Her 100ms'de bir kontrol et ve gerekirse düzelt
-            this._circleStyleInterval = setInterval(() => {
-                if (this._circle && this._circle._path && this._accuracy) {
-                    const threshold = this.options.markerVisibilityThreshold || 30;
-                    const isLowAccuracy = this._accuracy > threshold;
-                    const path = this._circle._path;
-                    const currentDashArray = path.getAttribute('stroke-dasharray');
-                    
-                    // Yanlış durumda ise düzelt
-                    if (isLowAccuracy && (!currentDashArray || currentDashArray === '')) {
-                        this._forceCircleDashArray(true);
-                    } else if (!isLowAccuracy && currentDashArray && currentDashArray !== '') {
-                        this._forceCircleDashArray(false);
-                    }
-                }
-            }, 100);
-        },
-        
-        // RADİKAL: Stil kontrolünü durdur
-        _stopCircleStyleWatcher: function() {
-            if (this._circleStyleInterval) {
-                clearInterval(this._circleStyleInterval);
-                this._circleStyleInterval = undefined;
-            }
         },
 
         // Doğruluk değerine göre renk döndür
