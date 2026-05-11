@@ -237,9 +237,20 @@
             // Marker görünürlük eşiği (metre)
             markerVisibilityThreshold: 30, // Accuracy bu değerin altındaysa marker gösterilir
             
+            // ========== RENK ÖZELLEŞTİRME ==========
+            markerColor: '#000000',         // Marker iç nokta rengi
+            markerRingColor: '#ffffff',     // Marker dış halka rengi
+            markerShadowColor: '#000000',   // Marker gölge rengi
+            orientationColor: '#c00000',    // Yön oku üst kısım rengi
+            circleColor: '#000000',         // Accuracy circle rengi
+            circleFillOpacity: 0.2,         // Circle dolgu opaklığı
+            circleStrokeOpacity: 0.5,       // Circle çizgi opaklığı
+            
             // ========== FALLBACK MARKER FADE ==========
-            fadeMarkerOnFallback: true,     // Geofence dışı / PDR / son iyi konum durumunda marker'ı silikleştir
+            fadeMarkerOnFallback: true,     // Geofence dışı / PDR / son iyi konum durumunda marker'ı değiştir
             fallbackMarkerOpacity: 0.45,    // Silikleştirilmiş marker opacity değeri (0-1)
+            fallbackMarkerColor: '#9E9E9E', // Fallback durumunda marker iç nokta rengi
+            fallbackOrientationColor: '#9E9E9E', // Fallback durumunda yön oku rengi
             
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
@@ -2480,52 +2491,69 @@
                 }
             }
 
-            let icon_name;
-            if (this._geolocation && this._orientation && this._angle) icon_name = "iconOrientation";
-            else if (this._geolocation) icon_name = "iconGeolocation";
+            let icon_type;
+            if (this._geolocation && this._orientation && this._angle) icon_type = "orientation";
+            else if (this._geolocation) icon_type = "geolocation";
             else {
                 return;
             }
 
             // Accuracy circle güncelle
-            const accuracyColor = this._getAccuracyColor(this._accuracy);
+            var circleColor = this._getAccuracyColor(this._accuracy);
+            var cFill = this.options.circleFillOpacity;
+            var cStroke = this.options.circleStrokeOpacity;
 
             if (this._circle) {
                 this._circle.setLatLng([this._latitude, this._longitude]);
                 this._circle.setRadius(this._accuracy);
                 this._circle.setStyle({
-                    fillColor: accuracyColor,
-                    color: accuracyColor,
-                    fillOpacity: 0.2,
-                    opacity: 0.5,
+                    fillColor: circleColor,
+                    color: circleColor,
+                    fillOpacity: cFill,
+                    opacity: cStroke,
                     weight: 1,
                     dashArray: ''
                 });
             } else if (this.options.drawCircle) {
                 this._circle = L.circle([this._latitude, this._longitude], {
                     radius: this._accuracy,
-                    fillColor: accuracyColor,
-                    color: accuracyColor,
-                    fillOpacity: 0.2,
-                    opacity: 0.5,
+                    fillColor: circleColor,
+                    color: circleColor,
+                    fillOpacity: cFill,
+                    opacity: cStroke,
                     weight: 1,
                     dashArray: ''
                 }).addTo(this._map);
             }
 
-            // Konum marker'ını her zaman göster ve güncelle
-            if (this._marker && this._marker.icon_name === icon_name) {
+            // Fallback durumuna göre ikon renklerini belirle
+            var isFb = this.options.fadeMarkerOnFallback && this._isFallbackLocation;
+            var dotColor = isFb ? this.options.fallbackMarkerColor : this.options.markerColor;
+            var arrowColor = isFb ? this.options.fallbackOrientationColor : this.options.orientationColor;
+            var ringColor = this.options.markerRingColor;
+            var shadowColor = this.options.markerShadowColor;
+
+            // Renk veya tip değişti mi? (yeniden oluştur)
+            var needsRebuild = !this._marker ||
+                this._marker._iconType !== icon_type ||
+                this._marker._iconDotColor !== dotColor ||
+                this._marker._iconArrowColor !== arrowColor;
+
+            if (!needsRebuild) {
                 this._marker.setLatLng([this._latitude, this._longitude]);
             } else {
                 if (this._marker) this._map.removeLayer(this._marker);
-                this._marker = L.marker([this._latitude, this._longitude], {
-                    icon: this.options[icon_name]
-                });
-                this._marker.icon_name = icon_name;
+                var icon = (icon_type === 'orientation')
+                    ? this._buildOrientationIcon(dotColor, ringColor, shadowColor, arrowColor)
+                    : this._buildGeolocationIcon(dotColor, ringColor, shadowColor);
+                this._marker = L.marker([this._latitude, this._longitude], { icon: icon });
+                this._marker._iconType = icon_type;
+                this._marker._iconDotColor = dotColor;
+                this._marker._iconArrowColor = arrowColor;
                 this._marker.addTo(this._map);
             }
             
-            // Fallback durumunda marker'ı silikleştir
+            // Fallback opacity
             this._applyMarkerFallbackStyle();
 
             this._lastAccuracy = this._accuracy;
@@ -2545,8 +2573,54 @@
             }
         },
 
+        _buildGeolocationIcon: function (dotColor, ringColor, shadowColor) {
+            var c = dotColor || this.options.markerColor;
+            var r = ringColor || this.options.markerRingColor;
+            var s = shadowColor || this.options.markerShadowColor;
+            return L.divIcon({
+                html: '<svg width="24" height="24" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg">' +
+                    '<defs><filter id="sl-shadow"><feGaussianBlur stdDeviation="0.5"/></filter></defs>' +
+                    '<circle fill="' + s + '" style="opacity:0.3;filter:url(#sl-shadow)" cx="1" cy="1" r="10"/>' +
+                    '<circle fill="' + r + '" r="10"/>' +
+                    '<circle fill="' + c + '" r="6">' +
+                    '<animate attributeName="r" values="6;8;6" dur="2s" repeatCount="indefinite"/>' +
+                    '</circle></svg>',
+                className: 'leaflet-simple-locate-icon',
+                iconSize: [24, 24],
+                iconAnchor: [12, 12]
+            });
+        },
+
+        _buildOrientationIcon: function (dotColor, ringColor, shadowColor, arrowColor) {
+            var c = dotColor || this.options.markerColor;
+            var r = ringColor || this.options.markerRingColor;
+            var s = shadowColor || this.options.markerShadowColor;
+            var a = arrowColor || this.options.orientationColor;
+            return L.divIcon({
+                html: '<svg width="96" height="96" viewBox="-48 -48 96 96" xmlns="http://www.w3.org/2000/svg">' +
+                    '<defs>' +
+                    '<linearGradient id="sl-grad" x2="0" y2="-48" gradientUnits="userSpaceOnUse">' +
+                    '<stop style="stop-color:' + a + ';stop-opacity:1" offset="0"/>' +
+                    '<stop style="stop-color:' + a + ';stop-opacity:0" offset="1"/>' +
+                    '</linearGradient>' +
+                    '<filter id="sl-shadow"><feGaussianBlur stdDeviation="0.5"/></filter>' +
+                    '</defs>' +
+                    '<path class="orientation" opacity="1" style="fill:url(#sl-grad)" d="M -24,-48 H 24 L 10,0 H -10 z">' +
+                    '<animate attributeName="opacity" values=".75;.33;.75" dur="2s" repeatCount="indefinite"/>' +
+                    '</path>' +
+                    '<circle fill="' + s + '" style="opacity:0.3;filter:url(#sl-shadow)" cx="1" cy="1" r="10"/>' +
+                    '<circle fill="' + r + '" r="10"/>' +
+                    '<circle fill="' + c + '" r="6">' +
+                    '<animate attributeName="r" values="6;9;6" dur="2s" repeatCount="indefinite"/>' +
+                    '</circle></svg>',
+                className: 'leaflet-simple-locate-icon',
+                iconSize: [96, 96],
+                iconAnchor: [48, 48]
+            });
+        },
+
         _getAccuracyColor: function (accuracy) {
-            return '#000000';
+            return this.options.circleColor || '#000000';
         },
 
         // Kalman filtresini uygula

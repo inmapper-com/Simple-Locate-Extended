@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="utf-8">
+    <title>Marker Renk Özelleştirme Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; }
+        #map { height: 100%; width: 100%; }
+
+        .panel {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            z-index: 1000;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.14);
+            width: 280px;
+            font-size: 13px;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #eee;
+            font-weight: 600;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .panel-body { padding: 12px 16px; }
+        .section { margin-bottom: 14px; }
+        .section:last-child { margin-bottom: 4px; }
+
+        .section-title {
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #888;
+            margin-bottom: 8px;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+
+        .row label { color: #555; font-size: 12px; }
+
+        .row input[type="color"] {
+            width: 28px; height: 22px;
+            border: 1px solid #ddd; border-radius: 4px;
+            padding: 1px; cursor: pointer;
+        }
+
+        .row input[type="range"] { width: 80px; accent-color: #1976d2; }
+        .row .val { font-size: 11px; color: #999; min-width: 28px; text-align: right; }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+        }
+
+        .toggle-row > span { font-size: 13px; font-weight: 500; color: #333; }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px; height: 22px;
+        }
+
+        .switch input {
+            position: absolute;
+            width: 40px; height: 22px;
+            opacity: 0; cursor: pointer;
+            margin: 0; z-index: 2;
+        }
+
+        .switch .track {
+            position: absolute; inset: 0;
+            background: #ccc; border-radius: 22px;
+            transition: background 0.2s;
+        }
+
+        .switch .track::before {
+            content: '';
+            position: absolute;
+            width: 16px; height: 16px;
+            left: 3px; bottom: 3px;
+            background: #fff; border-radius: 50%;
+            transition: transform 0.2s;
+        }
+
+        .switch input:checked + .track { background: #1976d2; }
+        .switch input:checked + .track::before { transform: translateX(18px); }
+
+        .status-bar {
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border-top: 1px solid #eee;
+            font-size: 12px; color: #666;
+            text-align: center;
+        }
+
+        .status-bar.fallback { background: #fff3e0; color: #e65100; }
+        .status-bar.normal { background: #e8f5e9; color: #2e7d32; }
+
+        .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+
+        .btn {
+            flex: 1; padding: 7px 0; border: none; border-radius: 6px;
+            font-size: 12px; font-weight: 500; cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .btn-type { background: #e3f2fd; color: #1565c0; }
+        .btn-type:hover { background: #bbdefb; }
+        .btn-type.active { background: #1976d2; color: #fff; }
+
+        .btn-export {
+            width: 100%;
+            padding: 9px 0;
+            margin-top: 10px;
+            background: #263238;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .btn-export:hover { background: #37474f; }
+        .btn-export.copied { background: #2e7d32; }
+
+        /* Export modal */
+        .modal-overlay {
+            display: none;
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 2000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.show { display: flex; }
+
+        .modal {
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.2);
+            width: 480px;
+            max-height: 80vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            padding: 14px 20px;
+            background: #263238;
+            color: #fff;
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-close {
+            background: none; border: none;
+            color: #fff; font-size: 20px;
+            cursor: pointer; line-height: 1;
+        }
+
+        .modal-body {
+            padding: 16px 20px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .modal-body pre {
+            background: #f5f5f5;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 12px;
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            line-height: 1.6;
+            white-space: pre;
+            overflow-x: auto;
+            color: #333;
+        }
+
+        .modal-footer {
+            padding: 12px 20px;
+            border-top: 1px solid #eee;
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .modal-btn {
+            padding: 8px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+
+        .modal-btn-copy { background: #1976d2; color: #fff; }
+        .modal-btn-copy:hover { background: #1565c0; }
+        .modal-btn-copy.copied { background: #2e7d32; }
+        .modal-btn-close { background: #eee; color: #555; }
+        .modal-btn-close:hover { background: #ddd; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="panel">
+        <div class="panel-header">Marker & Circle Renkleri</div>
+        <div class="panel-body">
+            <div class="section">
+                <div class="section-title">Marker (Normal)</div>
+                <div class="row"><label>Nokta</label><input type="color" id="markerColor" value="#000000"></div>
+                <div class="row"><label>Halka</label><input type="color" id="markerRingColor" value="#ffffff"></div>
+                <div class="row"><label>Yön Oku</label><input type="color" id="orientationColor" value="#c00000"></div>
+            </div>
+            <div class="section">
+                <div class="section-title">Marker (Fallback)</div>
+                <div class="row"><label>Nokta</label><input type="color" id="fallbackMarkerColor" value="#9E9E9E"></div>
+                <div class="row"><label>Yön Oku</label><input type="color" id="fallbackOrientationColor" value="#9E9E9E"></div>
+                <div class="row">
+                    <label>Opacity</label>
+                    <input type="range" id="fallbackOpacity" min="0.1" max="1" step="0.05" value="0.45">
+                    <span class="val" id="fallbackOpacityVal">0.45</span>
+                </div>
+            </div>
+            <div class="section">
+                <div class="section-title">Circle</div>
+                <div class="row"><label>Renk</label><input type="color" id="circleColor" value="#000000"></div>
+                <div class="row">
+                    <label>Dolgu</label>
+                    <input type="range" id="circleFillOpacity" min="0.05" max="0.5" step="0.05" value="0.2">
+                    <span class="val" id="circleFillVal">0.20</span>
+                </div>
+                <div class="row">
+                    <label>Çizgi</label>
+                    <input type="range" id="circleStrokeOpacity" min="0.1" max="1" step="0.05" value="0.5">
+                    <span class="val" id="circleStrokeVal">0.50</span>
+                </div>
+            </div>
+            <div class="section">
+                <div class="toggle-row">
+                    <span>Fallback Modu</span>
+                    <div class="switch">
+                        <input type="checkbox" id="fallbackToggle">
+                        <span class="track"></span>
+                    </div>
+                </div>
+                <div class="btn-row">
+                    <button class="btn btn-type active" id="btnOrientation">Yön Oklu</button>
+                    <button class="btn btn-type" id="btnGeolocation">Sadece Nokta</button>
+                </div>
+                <button class="btn-export" id="btnExport">Kodu Kopyala</button>
+            </div>
+        </div>
+        <div class="status-bar normal" id="statusBar">Normal Konum</div>
+    </div>
+
+    <!-- Export Modal -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <span>Plugin Konfigürasyonu</span>
+                <button class="modal-close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal-body">
+                <pre id="exportCode"></pre>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-close" id="modalCloseBtn">Kapat</button>
+                <button class="modal-btn modal-btn-copy" id="modalCopyBtn">Kopyala</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var map = L.map('map').setView([37.4257, 31.8525], 17);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap', maxZoom: 19
+        }).addTo(map);
+
+        var center = [37.4257, 31.8525];
+        var isFallback = false;
+        var iconType = 'orientation';
+
+        var cfg = {
+            markerColor: '#000000',
+            markerRingColor: '#ffffff',
+            markerShadowColor: '#000000',
+            orientationColor: '#c00000',
+            circleColor: '#000000',
+            circleFillOpacity: 0.2,
+            circleStrokeOpacity: 0.5,
+            fallbackMarkerColor: '#9e9e9e',
+            fallbackOrientationColor: '#9e9e9e',
+            fallbackMarkerOpacity: 0.45
+        };
+
+        var circle = L.circle(center, {
+            radius: 25,
+            fillColor: cfg.circleColor, color: cfg.circleColor,
+            fillOpacity: cfg.circleFillOpacity, opacity: cfg.circleStrokeOpacity, weight: 1
+        }).addTo(map);
+
+        var marker = null;
+
+        function buildGeoIcon(dot, ring, shadow) {
+            return L.divIcon({
+                html: '<svg width="24" height="24" viewBox="-12 -12 24 24" xmlns="http://www.w3.org/2000/svg">' +
+                    '<defs><filter id="ds"><feGaussianBlur stdDeviation="0.5"/></filter></defs>' +
+                    '<circle fill="' + shadow + '" style="opacity:0.3;filter:url(#ds)" cx="1" cy="1" r="10"/>' +
+                    '<circle fill="' + ring + '" r="10"/>' +
+                    '<circle fill="' + dot + '" r="6"><animate attributeName="r" values="6;8;6" dur="2s" repeatCount="indefinite"/></circle></svg>',
+                className: 'leaflet-simple-locate-icon',
+                iconSize: [24, 24], iconAnchor: [12, 12]
+            });
+        }
+
+        function buildOriIcon(dot, ring, shadow, arrow) {
+            return L.divIcon({
+                html: '<svg width="96" height="96" viewBox="-48 -48 96 96" xmlns="http://www.w3.org/2000/svg">' +
+                    '<defs><linearGradient id="og" x2="0" y2="-48" gradientUnits="userSpaceOnUse">' +
+                    '<stop style="stop-color:' + arrow + ';stop-opacity:1" offset="0"/>' +
+                    '<stop style="stop-color:' + arrow + ';stop-opacity:0" offset="1"/></linearGradient>' +
+                    '<filter id="ds2"><feGaussianBlur stdDeviation="0.5"/></filter></defs>' +
+                    '<path opacity="1" style="fill:url(#og)" d="M -24,-48 H 24 L 10,0 H -10 z">' +
+                    '<animate attributeName="opacity" values=".75;.33;.75" dur="2s" repeatCount="indefinite"/></path>' +
+                    '<circle fill="' + shadow + '" style="opacity:0.3;filter:url(#ds2)" cx="1" cy="1" r="10"/>' +
+                    '<circle fill="' + ring + '" r="10"/>' +
+                    '<circle fill="' + dot + '" r="6"><animate attributeName="r" values="6;9;6" dur="2s" repeatCount="indefinite"/></circle></svg>',
+                className: 'leaflet-simple-locate-icon',
+                iconSize: [96, 96], iconAnchor: [48, 48]
+            });
+        }
+
+        function render() {
+            var dot = isFallback ? cfg.fallbackMarkerColor : cfg.markerColor;
+            var arrow = isFallback ? cfg.fallbackOrientationColor : cfg.orientationColor;
+
+            var icon = (iconType === 'orientation')
+                ? buildOriIcon(dot, cfg.markerRingColor, cfg.markerShadowColor, arrow)
+                : buildGeoIcon(dot, cfg.markerRingColor, cfg.markerShadowColor);
+
+            if (marker) map.removeLayer(marker);
+            marker = L.marker(center, { icon: icon }).addTo(map);
+
+            var op = isFallback ? cfg.fallbackMarkerOpacity : 1;
+            marker._icon.style.opacity = op;
+            marker._icon.style.transition = 'opacity 0.3s ease';
+
+            circle.setStyle({
+                fillColor: cfg.circleColor, color: cfg.circleColor,
+                fillOpacity: cfg.circleFillOpacity, opacity: cfg.circleStrokeOpacity
+            });
+
+            var bar = document.getElementById('statusBar');
+            if (isFallback) {
+                bar.textContent = 'Fallback — opacity ' + cfg.fallbackMarkerOpacity;
+                bar.className = 'status-bar fallback';
+            } else {
+                bar.textContent = 'Normal Konum';
+                bar.className = 'status-bar normal';
+            }
+        }
+
+        // Color pickers
+        ['markerColor', 'markerRingColor', 'orientationColor',
+         'fallbackMarkerColor', 'fallbackOrientationColor', 'circleColor'].forEach(function (id) {
+            document.getElementById(id).addEventListener('input', function () {
+                cfg[id] = this.value;
+                render();
+            });
+        });
+
+        // Sliders
+        document.getElementById('fallbackOpacity').addEventListener('input', function () {
+            cfg.fallbackMarkerOpacity = parseFloat(this.value);
+            document.getElementById('fallbackOpacityVal').textContent = this.value;
+            render();
+        });
+        document.getElementById('circleFillOpacity').addEventListener('input', function () {
+            cfg.circleFillOpacity = parseFloat(this.value);
+            document.getElementById('circleFillVal').textContent = parseFloat(this.value).toFixed(2);
+            render();
+        });
+        document.getElementById('circleStrokeOpacity').addEventListener('input', function () {
+            cfg.circleStrokeOpacity = parseFloat(this.value);
+            document.getElementById('circleStrokeVal').textContent = parseFloat(this.value).toFixed(2);
+            render();
+        });
+
+        // Fallback toggle
+        document.getElementById('fallbackToggle').addEventListener('change', function () {
+            isFallback = this.checked;
+            render();
+        });
+
+        // Icon type
+        document.getElementById('btnOrientation').addEventListener('click', function () {
+            iconType = 'orientation';
+            this.classList.add('active');
+            document.getElementById('btnGeolocation').classList.remove('active');
+            render();
+        });
+        document.getElementById('btnGeolocation').addEventListener('click', function () {
+            iconType = 'geolocation';
+            this.classList.add('active');
+            document.getElementById('btnOrientation').classList.remove('active');
+            render();
+        });
+
+        // Export
+        function generateCode() {
+            var lines = [];
+            lines.push('// Renk özelleştirme');
+            lines.push('markerColor: \'' + cfg.markerColor + '\',');
+            lines.push('markerRingColor: \'' + cfg.markerRingColor + '\',');
+            lines.push('orientationColor: \'' + cfg.orientationColor + '\',');
+            lines.push('circleColor: \'' + cfg.circleColor + '\',');
+            lines.push('circleFillOpacity: ' + cfg.circleFillOpacity + ',');
+            lines.push('circleStrokeOpacity: ' + cfg.circleStrokeOpacity + ',');
+            lines.push('');
+            lines.push('// Fallback (geofence dışı) görünümü');
+            lines.push('fadeMarkerOnFallback: true,');
+            lines.push('fallbackMarkerOpacity: ' + cfg.fallbackMarkerOpacity + ',');
+            lines.push('fallbackMarkerColor: \'' + cfg.fallbackMarkerColor + '\',');
+            lines.push('fallbackOrientationColor: \'' + cfg.fallbackOrientationColor + '\',');
+            return lines.join('\n');
+        }
+
+        var overlay = document.getElementById('modalOverlay');
+        var codeEl = document.getElementById('exportCode');
+
+        document.getElementById('btnExport').addEventListener('click', function () {
+            codeEl.textContent = generateCode();
+            overlay.classList.add('show');
+        });
+
+        document.getElementById('modalClose').addEventListener('click', function () {
+            overlay.classList.remove('show');
+        });
+        document.getElementById('modalCloseBtn').addEventListener('click', function () {
+            overlay.classList.remove('show');
+        });
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) overlay.classList.remove('show');
+        });
+
+        document.getElementById('modalCopyBtn').addEventListener('click', function () {
+            var btn = this;
+            navigator.clipboard.writeText(generateCode()).then(function () {
+                btn.textContent = 'Kopyalandı!';
+                btn.classList.add('copied');
+                setTimeout(function () {
+                    btn.textContent = 'Kopyala';
+                    btn.classList.remove('copied');
+                }, 1500);
+            });
+        });
+
+        render();
+    </script>
+</body>
+</html>
