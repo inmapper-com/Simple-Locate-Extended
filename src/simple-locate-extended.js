@@ -50,7 +50,8 @@
                 circleWatcher: options.circleWatcher !== false,
                 weiYePanel: !!options.weiYePanel,
                 settingsControl: !!options.settingsControl,
-                deadReckoning: !!options.enableDeadReckoning
+                deadReckoning: !!options.enableDeadReckoning,
+                fadeMarkerOnFallback: options.fadeMarkerOnFallback !== false
             };
 
             // Ayarlar kontrolünü oluştur
@@ -152,6 +153,12 @@
                     this.options.enableDeadReckoning = enabled;
                     if (!enabled && this._pdr && this._pdr.active) {
                         this._stopDeadReckoning("kullanıcı tarafından kapatıldı");
+                    }
+                    break;
+                case 'fadeMarkerOnFallback':
+                    this.options.fadeMarkerOnFallback = enabled;
+                    if (typeof this._applyMarkerFallbackStyle === 'function') {
+                        this._applyMarkerFallbackStyle();
                     }
                     break;
             }

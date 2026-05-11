@@ -237,6 +237,10 @@
             // Marker görünürlük eşiği (metre)
             markerVisibilityThreshold: 30, // Accuracy bu değerin altındaysa marker gösterilir
             
+            // ========== FALLBACK MARKER FADE ==========
+            fadeMarkerOnFallback: true,     // Geofence dışı / PDR / son iyi konum durumunda marker'ı silikleştir
+            fallbackMarkerOpacity: 0.45,    // Silikleştirilmiş marker opacity değeri (0-1)
+            
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
             pdrStepLength: 0.65,            // Ortalama adım uzunluğu (metre)
@@ -487,6 +491,9 @@
                 sampleCount: 0,             // Toplam altitude örneği sayısı
                 platform: null              // Tespit edilen platform ('ios' | 'android' | 'unknown')
             };
+            
+            // ========== FALLBACK LOCATION STATE ==========
+            this._isFallbackLocation = false;
             
             // ========== PEDESTRIAN DEAD RECKONING (PDR) STATE ==========
             this._pdr = {
@@ -1677,6 +1684,7 @@
             const finalGeofenceCheck = this._isInsideGeofence(filteredPosition.latitude, filteredPosition.longitude);
             if (!finalGeofenceCheck.inside) {
                 this._locationStats.geofenceRejections++;
+                this._isFallbackLocation = true;
                 
                 // Dead reckoning başlat (aktif değilse)
                 if (this.options.enableDeadReckoning && !this._pdr.active) {
@@ -1689,18 +1697,19 @@
                     this._longitude = this._pdr.currentLongitude;
                     this._accuracy = this._pdr.currentAccuracy;
                 } else if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
-                    // Son iyi iç mekan konumunu koru (güncelleme yapma)
                     this._latitude = this._lastGoodLocation.latitude;
                     this._longitude = this._lastGoodLocation.longitude;
                     this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
                 } else {
-                    // Hiç iyi konum yoksa güncelleme yapma
                     return;
                 }
                 
                 this._updateMarker();
                 return;
             }
+            
+            // Geofence içinde — gerçek GPS konumu
+            this._isFallbackLocation = false;
 
             // Önceki filtrelenmiş konumla aynıysa güncelleme yapma (micro değişiklikleri engelle)
             if (this._latitude && filteredPosition.latitude &&
@@ -2461,7 +2470,7 @@
             // ========== EK GÜVENLİK: MARKER GÜNCELLENİRKEN DE GEOFENCE KONTROLÜ ==========
             const markerGeofenceCheck = this._isInsideGeofence(this._latitude, this._longitude);
             if (!markerGeofenceCheck.inside) {
-                // Geofence dışı - son iyi konumu koruyarak güncellemeyi atla
+                this._isFallbackLocation = true;
                 if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
                     this._latitude = this._lastGoodLocation.latitude;
                     this._longitude = this._lastGoodLocation.longitude;
@@ -2515,14 +2524,29 @@
                 this._marker.icon_name = icon_name;
                 this._marker.addTo(this._map);
             }
+            
+            // Fallback durumunda marker'ı silikleştir
+            this._applyMarkerFallbackStyle();
 
             this._lastAccuracy = this._accuracy;
         },
 
-        // Doğruluk değerine göre renk döndür
-        // Kullanıcı talebi: Her zaman siyah
+        _applyMarkerFallbackStyle: function () {
+            if (!this._marker || !this._marker._icon) return;
+            
+            var icon = this._marker._icon;
+            
+            if (this.options.fadeMarkerOnFallback && this._isFallbackLocation) {
+                icon.style.opacity = this.options.fallbackMarkerOpacity;
+                icon.style.transition = 'opacity 0.3s ease';
+            } else {
+                icon.style.opacity = '1';
+                icon.style.transition = 'opacity 0.3s ease';
+            }
+        },
+
         _getAccuracyColor: function (accuracy) {
-            return '#000000'; // Her zaman siyah
+            return '#000000';
         },
 
         // Kalman filtresini uygula
