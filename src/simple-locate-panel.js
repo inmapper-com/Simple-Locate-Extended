@@ -194,6 +194,7 @@
             orientationUpdates: 0,
             displayUpdates: 0,
             pdrSteps: 0,
+            pdrBlocked: 0,
             jumps: 0,
             drSessions: 0,
             drTotalMs: 0,
@@ -350,6 +351,7 @@
     // PDR adımı algılandı
     LocateLogger.prototype.noteStep = function (info) {
         if (info.moved === false) {
+            this.stats.pdrBlocked = (this.stats.pdrBlocked || 0) + 1;
             this.log('step', 'warn',
                 'Adım algılandı ama konum güncellenmedi' +
                 (info.blockedReason ? ' (' + info.blockedReason + ')' : ''),
@@ -595,10 +597,9 @@
                     lng: this._pdr.currentLongitude,
                     stepCount: this._pdr.stepCount
                 } : null;
-                var r = origStep.apply(this, arguments);
+                var result = origStep.apply(this, arguments);
                 if (this._pdr && before) {
-                    var moved = this._pdr.stepCount > before.stepCount;
-                    var blocked = !moved && this._angle == null;
+                    var moved = result === 'ok';
                     logger.noteStep({
                         stepCount: this._pdr.stepCount,
                         heading: this._angle,
@@ -606,10 +607,11 @@
                         lng: this._pdr.currentLongitude,
                         accuracy: this._pdr.currentAccuracy,
                         moved: moved,
-                        blockedReason: blocked ? 'pusula yok' : (!moved ? 'geofence sınırı' : null)
+                        blockedReason: result === 'no_heading' ? 'pusula yok'
+                            : (result === 'geofence' ? 'geofence sınırı' : null)
                     });
                 }
-                return r;
+                return result;
             };
         }
 
@@ -851,6 +853,7 @@
             [st.rejected, 'Red'],
             [st.fallbackUpdates, 'Son iyi'],
             [st.pdrSteps, 'PDR adım'],
+            [st.pdrBlocked || 0, 'PDR engel'],
             [st.drSessions, 'DR oturum'],
             [fmtDur(st.drTotalMs + (this.logger.drSession ? Date.now() - this.logger.drSession.start : 0)), 'Top. DR'],
             [st.orientationUpdates || 0, 'Yön (sessiz)']

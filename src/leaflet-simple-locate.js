@@ -527,7 +527,10 @@
                 valleyDetected: false,
                 // Adaptive threshold
                 recentPeaks: [],
-                dynamicThreshold: 0
+                dynamicThreshold: 0,
+                accBaseline: null,
+                phaseStartTime: 0,
+                useGravityFreeAccel: false
             };
         },
         
@@ -2167,6 +2170,9 @@
             this._pdr.valleyDetected = false;
             this._pdr.recentPeaks = [];
             this._pdr.dynamicThreshold = this.options.pdrStepThreshold;
+            this._pdr.accBaseline = null;
+            this._pdr.phaseStartTime = 0;
+            this._pdr.useGravityFreeAccel = false;
             
             // DeviceMotion dinlemeye başla
             var self = this;
@@ -2208,6 +2214,36 @@
             this._pdr.active = false;
         },
         
+        // PDR ivme sinyali — önce yerçekimsiz acceleration, yoksa high-pass fallback
+        _computePdrAccelSample: function (event) {
+            var lin = event.acceleration;
+            if (lin && lin.x !== null && lin.y !== null && lin.z !== null) {
+                this._pdr.useGravityFreeAccel = true;
+                return Math.sqrt(lin.x * lin.x + lin.y * lin.y + lin.z * lin.z);
+            }
+
+            var acc = event.accelerationIncludingGravity;
+            if (!acc || acc.x === null) return null;
+
+            this._pdr.useGravityFreeAccel = false;
+            return Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+        },
+
+        _computePdrDelta: function (avgMag) {
+            if (this._pdr.useGravityFreeAccel) {
+                return avgMag;
+            }
+
+            if (this._pdr.accBaseline == null) {
+                this._pdr.accBaseline = avgMag;
+                return 0;
+            }
+
+            // Telefon döndükçe |mag-9.81| bozulur; EMA baseline ile high-pass
+            this._pdr.accBaseline = this._pdr.accBaseline * 0.92 + avgMag * 0.08;
+            return Math.abs(avgMag - this._pdr.accBaseline);
+        },
+
         // DeviceMotion event handler - adım tespiti
         _onDeviceMotion: function (event) {
             if (!this._pdr.active) return;
@@ -2224,69 +2260,52 @@
                 return;
             }
             
-            var acc = event.accelerationIncludingGravity;
-            if (!acc || acc.x === null) return;
+            var magnitude = this._computePdrAccelSample(event);
+            if (magnitude == null) return;
             
-            var magnitude = Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
-            
-            // Buffer'a ekle (12 sample ~ 120-200ms smoothing)
             this._pdr.accBuffer.push(magnitude);
             if (this._pdr.accBuffer.length > this._pdr.accBufferSize) {
                 this._pdr.accBuffer.shift();
             }
             
-            // Buffer dolmadan işlem yapma (ilk anlık gürültüyü atla)
             if (this._pdr.accBuffer.length < this._pdr.accBufferSize) return;
             
-            // Buffer ortalaması
             var avgMag = 0;
             for (var i = 0; i < this._pdr.accBuffer.length; i++) {
                 avgMag += this._pdr.accBuffer[i];
             }
             avgMag /= this._pdr.accBuffer.length;
             
-            var g = 9.81;
-            var delta = Math.abs(avgMag - g);
-            
-            // ═══ ADIM TESPİT: TAM DALGA FORMU + ADAPTİVE THRESHOLD ═══
-            //
-            // Gerçek bir adım sinyali: yükseliş → ZİRVE → düşüş → VADİ → tekrar
-            // Adım ancak hem zirve hem vadi gözlendiğinde sayılır.
-            //
-            // Fazlar:
-            //   !isStepPhase: ivme düşük, zirve bekleniyor
-            //   isStepPhase + !valleyDetected: zirve geçildi, vadiye düşmesi bekleniyor
-            //   isStepPhase + valleyDetected: tam dalga tamamlandı → adım say
+            var delta = this._computePdrDelta(avgMag);
             
             var threshold = this._pdr.dynamicThreshold || this.options.pdrStepThreshold;
+            if (this._pdr.useGravityFreeAccel) {
+                threshold = Math.min(threshold, this.options.pdrStepThreshold);
+            }
             var prevDelta = this._pdr.lastAccMagnitude;
             
             if (!this._pdr.isStepPhase && delta > threshold) {
-                // Eşik aşıldı → zirve fazına gir
                 this._pdr.isStepPhase = true;
+                this._pdr.phaseStartTime = now;
                 this._pdr.peakValue = delta;
                 this._pdr.valleyDetected = false;
                 
             } else if (this._pdr.isStepPhase) {
-                // Zirve fazındayız — zirve değerini takip et
                 if (delta > this._pdr.peakValue) {
                     this._pdr.peakValue = delta;
                 }
                 
-                // Vadi tespiti: sinyal eşiğin %40'ının altına düştüyse vadi geçildi
-                if (!this._pdr.valleyDetected && delta < threshold * 0.4) {
+                // Vadi: mutlak eşik VEYA zirvenin %45 altına düşüş (sürekli yürüyüşte daha güvenilir)
+                var valleyLevel = Math.min(threshold * 0.5, this._pdr.peakValue * 0.45);
+                if (!this._pdr.valleyDetected && delta < valleyLevel) {
                     this._pdr.valleyDetected = true;
                 }
                 
-                // Sinyal tekrar yükselmeye başladı VE vadi geçildi → tam dalga = 1 adım
-                if (this._pdr.valleyDetected && delta > prevDelta && delta > threshold * 0.5) {
-                    // Zirve büyüklüğü yeterli mi?
+                if (this._pdr.valleyDetected && delta > prevDelta && delta > threshold * 0.45) {
                     if (this._pdr.peakValue >= this.options.pdrMinPeakValue) {
-                        // Cooldown kontrolü
                         if (now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
                             this._pdr.lastStepTime = now;
                             
-                            // Adaptive threshold: son zirve değerlerinin ortalamasına göre eşiği ayarla
                             if (this.options.pdrAdaptiveThreshold) {
                                 this._pdr.recentPeaks.push(this._pdr.peakValue);
                                 if (this._pdr.recentPeaks.length > 8) {
@@ -2298,10 +2317,12 @@
                                         peakSum += this._pdr.recentPeaks[p];
                                     }
                                     var peakAvg = peakSum / this._pdr.recentPeaks.length;
-                                    // Eşik = ortalama zirvenin %40'ı, ama baz eşiğin altına düşmesin
-                                    this._pdr.dynamicThreshold = Math.max(
-                                        this.options.pdrStepThreshold * 0.6,
-                                        peakAvg * 0.4
+                                    this._pdr.dynamicThreshold = Math.min(
+                                        this.options.pdrStepThreshold * 1.3,
+                                        Math.max(
+                                            this.options.pdrStepThreshold * 0.55,
+                                            peakAvg * 0.4
+                                        )
                                     );
                                 }
                             }
@@ -2310,15 +2331,16 @@
                         }
                     }
                     
-                    // Fazı sıfırla (adım sayılsın veya sayılmasın)
                     this._pdr.isStepPhase = false;
+                    this._pdr.phaseStartTime = 0;
                     this._pdr.peakValue = 0;
                     this._pdr.valleyDetected = false;
                 }
                 
-                // Güvenlik: çok uzun süredir zirve fazında kalındıysa sıfırla (sahte sinyal)
-                if (this._pdr.isStepPhase && now - this._pdr.lastStepTime > 2000 && this._pdr.lastStepTime > 0) {
+                // Faz çok uzun sürdüyse sıfırla (telefon döndürme / eksik vadi)
+                if (this._pdr.phaseStartTime && now - this._pdr.phaseStartTime > 1200) {
                     this._pdr.isStepPhase = false;
+                    this._pdr.phaseStartTime = 0;
                     this._pdr.peakValue = 0;
                     this._pdr.valleyDetected = false;
                 }
@@ -2329,10 +2351,9 @@
         
         // Bir adım algılandı - konum güncelle
         _onStepDetected: function () {
-            // Heading (pusula yönü) mevcut mu?
             var heading = this._angle;
             if (heading === undefined || heading === null) {
-                return;
+                return 'no_heading';
             }
 
             var stepLength = this.options.pdrStepLength;
@@ -2345,27 +2366,18 @@
 
             var geofenceCheck = this._isInsideGeofence(newLat, newLng);
             if (!geofenceCheck.inside) {
-                return;
+                return 'geofence';
             }
 
             this._pdr.stepCount++;
             this._pdr.currentLatitude = newLat;
             this._pdr.currentLongitude = newLng;
-            
-            // Accuracy: her adımda biraz artar (belirsizlik büyür)
             this._pdr.currentAccuracy += this.options.pdrAccuracyDecay;
-            
-            // Ana konum değişkenlerini güncelle
             this._latitude = newLat;
             this._longitude = newLng;
             this._accuracy = this._pdr.currentAccuracy;
-            
-            // Marker'ı güncelle
             this._updateMarker();
-            
-            // console.log("🦶 PDR Adım #" + this._pdr.stepCount + 
-            //     " → [" + newLat.toFixed(6) + ", " + newLng.toFixed(6) + "]" +
-            //     " accuracy: " + this._pdr.currentAccuracy.toFixed(1) + "m");
+            return 'ok';
         },
         
         // PDR aktif mi? (dışarıdan sorgulanabilir)
