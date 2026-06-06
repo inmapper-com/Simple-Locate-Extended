@@ -255,11 +255,11 @@
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
             pdrStepLength: 0.65,            // Ortalama adım uzunluğu (metre)
-            pdrStepThreshold: 1.2,          // Adım tespiti için ivme eşiği (g kuvveti) - adaptive threshold baz değeri
-            pdrStepCooldown: 400,           // İki adım arası minimum süre (ms)
-            pdrMinPeakValue: 0.8,           // Zirvenin minimum büyüklüğü (çok küçük zirveleri reddet)
+            pdrStepThreshold: 1.0,          // High-pass ivme zirvesi için eşik (m/s²) - adaptif baz değeri
+            pdrStepCooldown: 300,           // İki adım arası minimum süre (ms)
+            pdrMinPeakValue: 0.7,           // Zirvenin minimum büyüklüğü (çok küçük zirveleri reddet)
             pdrAdaptiveThreshold: true,     // Dinamik eşik kullan
-            pdrMaxDuration: 60000,          // PDR maksimum aktif süresi (ms) - 60 saniye
+            pdrMaxDuration: 300000,         // PDR maksimum aktif süresi (ms) - 5 dakika (yürüyüş ortası kesilmesin)
             pdrMaxSteps: 100,               // PDR ile maksimum adım sayısı
             pdrAccuracyDecay: 0.5,          // Her adımda accuracy ne kadar artar (metre)
             pdrInitialAccuracy: 5,          // PDR başlangıç accuracy (metre)
@@ -517,20 +517,22 @@
                 currentLatitude: null,
                 currentLongitude: null,
                 currentAccuracy: null,
-                lastAccMagnitude: 0,
-                isStepPhase: false,
                 motionHandler: null,
-                accBuffer: [],
-                accBufferSize: 12,
-                // Tam dalga formu doğrulama
+                // ── Sinyal işleme ──
+                accelSource: null,      // 'gravity' | 'linear' (oturum başına sabitlenir)
+                gravityMag: null,       // yavaş EMA ile yerçekimi kestirimi
+                linearBuf: [],          // küçük yumuşatma buffer'ı (3 örnek)
+                // ── Zirve algılama (histerezis + refrakter) ──
+                armed: false,
                 peakValue: 0,
-                valleyDetected: false,
-                // Adaptive threshold
+                armTime: 0,
                 recentPeaks: [],
                 dynamicThreshold: 0,
-                accBaseline: null,
-                phaseStartTime: 0,
-                useGravityFreeAccel: false
+                // ── Teşhis ──
+                dbgSamples: 0,
+                dbgMaxLinear: 0,
+                dbgLastEmit: 0,
+                dbgStepsAtEmit: 0
             };
         },
         
@@ -2163,16 +2165,18 @@
             this._pdr.currentLatitude = baseLat;
             this._pdr.currentLongitude = baseLng;
             this._pdr.currentAccuracy = this.options.pdrInitialAccuracy;
-            this._pdr.lastAccMagnitude = 0;
-            this._pdr.isStepPhase = false;
-            this._pdr.accBuffer = [];
+            this._pdr.accelSource = null;
+            this._pdr.gravityMag = null;
+            this._pdr.linearBuf = [];
+            this._pdr.armed = false;
             this._pdr.peakValue = 0;
-            this._pdr.valleyDetected = false;
+            this._pdr.armTime = 0;
             this._pdr.recentPeaks = [];
             this._pdr.dynamicThreshold = this.options.pdrStepThreshold;
-            this._pdr.accBaseline = null;
-            this._pdr.phaseStartTime = 0;
-            this._pdr.useGravityFreeAccel = false;
+            this._pdr.dbgSamples = 0;
+            this._pdr.dbgMaxLinear = 0;
+            this._pdr.dbgLastEmit = Date.now();
+            this._pdr.dbgStepsAtEmit = 0;
             
             // DeviceMotion dinlemeye başla
             var self = this;
@@ -2214,40 +2218,30 @@
             this._pdr.active = false;
         },
         
-        // PDR ivme sinyali — önce yerçekimsiz acceleration, yoksa high-pass fallback
-        _computePdrAccelSample: function (event) {
+        // PDR sinyal kaynağını oturum başına SABİTLE (kare kare değişmesin)
+        // 'gravity' = accelerationIncludingGravity (her cihazda var, |mag| dönüşten bağımsız)
+        // 'linear'  = acceleration (yerçekimsiz, varsa daha temiz)
+        _resolvePdrAccel: function (event) {
+            if (this._pdr.accelSource === 'gravity') return event.accelerationIncludingGravity;
+            if (this._pdr.accelSource === 'linear') return event.acceleration;
+
+            var g = event.accelerationIncludingGravity;
+            if (g && g.x !== null && g.x !== undefined) {
+                this._pdr.accelSource = 'gravity';
+                return g;
+            }
             var lin = event.acceleration;
-            if (lin && lin.x !== null && lin.y !== null && lin.z !== null) {
-                this._pdr.useGravityFreeAccel = true;
-                return Math.sqrt(lin.x * lin.x + lin.y * lin.y + lin.z * lin.z);
+            if (lin && lin.x !== null && lin.x !== undefined) {
+                this._pdr.accelSource = 'linear';
+                return lin;
             }
-
-            var acc = event.accelerationIncludingGravity;
-            if (!acc || acc.x === null) return null;
-
-            this._pdr.useGravityFreeAccel = false;
-            return Math.sqrt(acc.x * acc.x + acc.y * acc.y + acc.z * acc.z);
+            return null;
         },
 
-        _computePdrDelta: function (avgMag) {
-            if (this._pdr.useGravityFreeAccel) {
-                return avgMag;
-            }
-
-            if (this._pdr.accBaseline == null) {
-                this._pdr.accBaseline = avgMag;
-                return 0;
-            }
-
-            // Telefon döndükçe |mag-9.81| bozulur; EMA baseline ile high-pass
-            this._pdr.accBaseline = this._pdr.accBaseline * 0.92 + avgMag * 0.08;
-            return Math.abs(avgMag - this._pdr.accBaseline);
-        },
-
-        // DeviceMotion event handler - adım tespiti
+        // DeviceMotion event handler - adım tespiti (high-pass + histerezisli zirve)
         _onDeviceMotion: function (event) {
             if (!this._pdr.active) return;
-            
+
             var now = Date.now();
             if (this.options.pdrMaxDuration > 0 && this.options.pdrMaxDuration !== Infinity &&
                 now - this._pdr.startTime > this.options.pdrMaxDuration) {
@@ -2259,95 +2253,100 @@
                 this._stopDeadReckoning("adım limiti aşıldı");
                 return;
             }
-            
-            var magnitude = this._computePdrAccelSample(event);
-            if (magnitude == null) return;
-            
-            this._pdr.accBuffer.push(magnitude);
-            if (this._pdr.accBuffer.length > this._pdr.accBufferSize) {
-                this._pdr.accBuffer.shift();
+
+            var a = this._resolvePdrAccel(event);
+            if (!a || a.x === null || a.x === undefined) return;
+
+            // Büyüklük (vektör normu) — telefon yönünden bağımsız
+            var mag = Math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+
+            // High-pass: yerçekimini yavaş EMA ile ayır (~0.5Hz cutoff → 2Hz adım sinyali korunur)
+            var sig;
+            if (this._pdr.accelSource === 'linear') {
+                sig = mag; // zaten yerçekimsiz
+            } else {
+                if (this._pdr.gravityMag == null) this._pdr.gravityMag = mag;
+                this._pdr.gravityMag = this._pdr.gravityMag * 0.9 + mag * 0.1;
+                sig = mag - this._pdr.gravityMag; // 0 etrafında salınım (adımda + zirve)
             }
-            
-            if (this._pdr.accBuffer.length < this._pdr.accBufferSize) return;
-            
-            var avgMag = 0;
-            for (var i = 0; i < this._pdr.accBuffer.length; i++) {
-                avgMag += this._pdr.accBuffer[i];
-            }
-            avgMag /= this._pdr.accBuffer.length;
-            
-            var delta = this._computePdrDelta(avgMag);
-            
-            var threshold = this._pdr.dynamicThreshold || this.options.pdrStepThreshold;
-            if (this._pdr.useGravityFreeAccel) {
-                threshold = Math.min(threshold, this.options.pdrStepThreshold);
-            }
-            var prevDelta = this._pdr.lastAccMagnitude;
-            
-            if (!this._pdr.isStepPhase && delta > threshold) {
-                this._pdr.isStepPhase = true;
-                this._pdr.phaseStartTime = now;
-                this._pdr.peakValue = delta;
-                this._pdr.valleyDetected = false;
-                
-            } else if (this._pdr.isStepPhase) {
-                if (delta > this._pdr.peakValue) {
-                    this._pdr.peakValue = delta;
+
+            // Hafif yumuşatma (3 örnek) — tek örnek gürültüsünü kes, zirveyi koru
+            this._pdr.linearBuf.push(sig);
+            if (this._pdr.linearBuf.length > 3) this._pdr.linearBuf.shift();
+            var s = 0;
+            for (var i = 0; i < this._pdr.linearBuf.length; i++) s += this._pdr.linearBuf[i];
+            s /= this._pdr.linearBuf.length;
+
+            // Teşhis: saniyede bir sinyal özeti yayınla
+            this._pdr.dbgSamples++;
+            if (s > this._pdr.dbgMaxLinear) this._pdr.dbgMaxLinear = s;
+
+            var thHigh = this._pdr.dynamicThreshold || this.options.pdrStepThreshold;
+            var thLow = thHigh * 0.5;
+
+            // ── Histerezisli zirve algılama ──
+            // sig eşiği yukarı geçince "armed"; tekrar alt banda düşünce 1 adım tamamlanır.
+            if (!this._pdr.armed) {
+                if (s > thHigh) {
+                    this._pdr.armed = true;
+                    this._pdr.peakValue = s;
+                    this._pdr.armTime = now;
                 }
-                
-                // Vadi: mutlak eşik VEYA zirvenin %45 altına düşüş (sürekli yürüyüşte daha güvenilir)
-                var valleyLevel = Math.min(threshold * 0.5, this._pdr.peakValue * 0.45);
-                if (!this._pdr.valleyDetected && delta < valleyLevel) {
-                    this._pdr.valleyDetected = true;
-                }
-                
-                if (this._pdr.valleyDetected && delta > prevDelta && delta > threshold * 0.45) {
-                    if (this._pdr.peakValue >= this.options.pdrMinPeakValue) {
-                        if (now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
-                            this._pdr.lastStepTime = now;
-                            
-                            if (this.options.pdrAdaptiveThreshold) {
-                                this._pdr.recentPeaks.push(this._pdr.peakValue);
-                                if (this._pdr.recentPeaks.length > 8) {
-                                    this._pdr.recentPeaks.shift();
-                                }
-                                if (this._pdr.recentPeaks.length >= 3) {
-                                    var peakSum = 0;
-                                    for (var p = 0; p < this._pdr.recentPeaks.length; p++) {
-                                        peakSum += this._pdr.recentPeaks[p];
-                                    }
-                                    var peakAvg = peakSum / this._pdr.recentPeaks.length;
-                                    this._pdr.dynamicThreshold = Math.min(
-                                        this.options.pdrStepThreshold * 1.3,
-                                        Math.max(
-                                            this.options.pdrStepThreshold * 0.55,
-                                            peakAvg * 0.4
-                                        )
-                                    );
-                                }
-                            }
-                            
-                            this._onStepDetected();
-                        }
+            } else {
+                if (s > this._pdr.peakValue) this._pdr.peakValue = s;
+
+                if (s < thLow) {
+                    // Tam bir zirve tamamlandı
+                    if (this._pdr.peakValue >= this.options.pdrMinPeakValue &&
+                        now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
+                        this._pdr.lastStepTime = now;
+                        this._registerPdrPeak(this._pdr.peakValue);
+                        this._onStepDetected();
                     }
-                    
-                    this._pdr.isStepPhase = false;
-                    this._pdr.phaseStartTime = 0;
+                    this._pdr.armed = false;
                     this._pdr.peakValue = 0;
-                    this._pdr.valleyDetected = false;
-                }
-                
-                // Faz çok uzun sürdüyse sıfırla (telefon döndürme / eksik vadi)
-                if (this._pdr.phaseStartTime && now - this._pdr.phaseStartTime > 1200) {
-                    this._pdr.isStepPhase = false;
-                    this._pdr.phaseStartTime = 0;
+                } else if (now - this._pdr.armTime > 1500) {
+                    // Güvenlik: çok uzun süre yüksekte kalındıysa (sürekli sarsıntı) sıfırla
+                    this._pdr.armed = false;
                     this._pdr.peakValue = 0;
-                    this._pdr.valleyDetected = false;
                 }
             }
-            
-            this._pdr.lastAccMagnitude = delta;
+
+            // Teşhis yayını (saniyede bir, panel loglayabilir)
+            if (now - this._pdr.dbgLastEmit >= 1000) {
+                if (typeof this._pdrSampleTick === 'function') {
+                    var dt = (now - this._pdr.dbgLastEmit) / 1000;
+                    this._pdrSampleTick({
+                        hz: Math.round(this._pdr.dbgSamples / Math.max(dt, 0.001)),
+                        maxLinear: this._pdr.dbgMaxLinear,
+                        threshold: thHigh,
+                        source: this._pdr.accelSource,
+                        stepsDelta: this._pdr.stepCount - this._pdr.dbgStepsAtEmit
+                    });
+                }
+                this._pdr.dbgSamples = 0;
+                this._pdr.dbgMaxLinear = 0;
+                this._pdr.dbgLastEmit = now;
+                this._pdr.dbgStepsAtEmit = this._pdr.stepCount;
+            }
         },
+
+        // Adaptif eşik — nazik ve tavanlı (tırmanmayı önler)
+        _registerPdrPeak: function (peak) {
+            if (!this.options.pdrAdaptiveThreshold) return;
+            this._pdr.recentPeaks.push(peak);
+            if (this._pdr.recentPeaks.length > 6) this._pdr.recentPeaks.shift();
+            if (this._pdr.recentPeaks.length < 3) return;
+            var sum = 0;
+            for (var p = 0; p < this._pdr.recentPeaks.length; p++) sum += this._pdr.recentPeaks[p];
+            var avg = sum / this._pdr.recentPeaks.length;
+            var base = this.options.pdrStepThreshold;
+            // Eşik ≈ tipik zirvenin %45'i; [base×0.6, base×1.4] arasında tutulur
+            this._pdr.dynamicThreshold = Math.min(base * 1.4, Math.max(base * 0.6, avg * 0.45));
+        },
+
+        // Teşhis kancası (panel sarar; çekirdekte no-op)
+        _pdrSampleTick: function (info) {},
         
         // Bir adım algılandı - konum güncelle
         _onStepDetected: function () {

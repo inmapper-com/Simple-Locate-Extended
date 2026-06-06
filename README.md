@@ -166,11 +166,11 @@ Her adımda konum, pusula yönünde `pdrStepLength` (0.65m) kadar ilerletilir ve
 |-----------|-----------|----------|
 | `enableDeadReckoning` | `false` | PDR aktif |
 | `pdrStepLength` | `0.65` | Adım uzunluğu (m) |
-| `pdrStepThreshold` | `1.2` | İvme eşiği (adaptive baz değer) |
-| `pdrStepCooldown` | `400` | Adımlar arası min süre (ms) |
-| `pdrMinPeakValue` | `0.8` | Minimum zirve büyüklüğü |
+| `pdrStepThreshold` | `1.0` | High-pass ivme zirve eşiği (adaptive baz değer) |
+| `pdrStepCooldown` | `300` | Adımlar arası min süre (ms) |
+| `pdrMinPeakValue` | `0.7` | Minimum zirve büyüklüğü |
 | `pdrAdaptiveThreshold` | `true` | Dinamik eşik |
-| `pdrMaxDuration` | `60000` | Maks PDR süresi (ms) |
+| `pdrMaxDuration` | `300000` | Maks PDR süresi (ms) |
 | `pdrMaxSteps` | `100` | Maks adım sayısı |
 | `pdrAccuracyDecay` | `0.5` | Adım başına accuracy artışı (m) |
 | `pdrInitialAccuracy` | `5` | Başlangıç accuracy (m) |

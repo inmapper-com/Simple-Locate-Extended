@@ -328,6 +328,28 @@
             { lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, geofenceInside: inside });
     };
 
+    // PDR sinyal teşhisi (saniyede bir) — adım sayılmama nedenini gösterir
+    LocateLogger.prototype.notePdrSample = function (info) {
+        if (!info) return;
+        var max = info.maxLinear != null ? num(info.maxLinear, 2) : '--';
+        var th = info.threshold != null ? num(info.threshold, 2) : '--';
+        var lvl = 'info';
+        var note = '';
+        if (info.stepsDelta > 0) {
+            note = info.stepsDelta + ' adım';
+        } else if (info.maxLinear != null && info.threshold != null && info.maxLinear < info.threshold) {
+            lvl = 'warn';
+            note = 'zirve eşik altında (yürüyüş yok / sinyal zayıf)';
+        } else if (info.maxLinear != null && info.threshold != null && info.maxLinear >= info.threshold) {
+            note = 'zirve eşik üstü ama adım yok (cooldown/min-peak)';
+        }
+        this.log('dr', lvl,
+            'PDR sinyal · max ' + max + ' / eşik ' + th + ' · ' + (info.hz || 0) + 'Hz · ' +
+            (info.source || '--') + (note ? ' · ' + note : ''),
+            { maxLinear: info.maxLinear, threshold: info.threshold, hz: info.hz,
+              source: info.source, stepsDelta: info.stepsDelta });
+    };
+
     // Dead reckoning başladı
     LocateLogger.prototype.noteDRStart = function (info) {
         this.drSession = { start: Date.now(), steps: 0, baseLat: info.baseLat, baseLng: info.baseLng };
@@ -612,6 +634,15 @@
                     });
                 }
                 return result;
+            };
+        }
+
+        // PDR sinyal teşhisi (saniyede bir) — adım sayılmama nedenini görmek için
+        if (typeof ctrl._pdrSampleTick === 'function') {
+            var origTick = ctrl._pdrSampleTick;
+            ctrl._pdrSampleTick = function (info) {
+                try { logger.notePdrSample(info); } catch (e) {}
+                return origTick.apply(this, arguments);
             };
         }
 
