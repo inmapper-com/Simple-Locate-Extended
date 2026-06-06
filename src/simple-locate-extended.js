@@ -542,6 +542,84 @@
         },
 
         /**
+         * Geofence sınırını harita katmanı olarak oluştur
+         * (polygon / bounds / center+radius önceliğine göre)
+         */
+        _buildGeofenceLayer: function () {
+            var o = this.options;
+            var style = L.Util.extend({
+                color: '#1976d2', weight: 2,
+                fillColor: '#1976d2', fillOpacity: 0.1,
+                dashArray: '5, 5', interactive: false
+            }, o.geofenceStyle || {});
+
+            if (o.geofencePolygon && o.geofencePolygon.length >= 3) {
+                var latlngs = o.geofencePolygon.map(function (p) { return [p.lat, p.lng]; });
+                return L.polygon(latlngs, style);
+            }
+            if (o.geofenceBounds) {
+                return L.rectangle(o.geofenceBounds, style);
+            }
+            if (o.geofenceCenter && o.geofenceRadius) {
+                return L.circle(o.geofenceCenter, L.Util.extend({ radius: o.geofenceRadius }, style));
+            }
+            return null;
+        },
+
+        /**
+         * Geofence çizimini göster
+         */
+        showGeofence: function () {
+            if (!this._map) return this;
+            if (!this._geofenceLayer) this._geofenceLayer = this._buildGeofenceLayer();
+            if (this._geofenceLayer && !this._map.hasLayer(this._geofenceLayer)) {
+                this._geofenceLayer.addTo(this._map);
+            }
+            this._geofenceVisible = true;
+            return this;
+        },
+
+        /**
+         * Geofence çizimini gizle
+         */
+        hideGeofence: function () {
+            if (this._geofenceLayer && this._map && this._map.hasLayer(this._geofenceLayer)) {
+                this._map.removeLayer(this._geofenceLayer);
+            }
+            this._geofenceVisible = false;
+            return this;
+        },
+
+        /**
+         * Geofence çizimini aç/kapat
+         * @param {boolean} [show] - Belirtilmezse mevcut durumu tersine çevirir
+         */
+        toggleGeofence: function (show) {
+            if (show === undefined) show = !this._geofenceVisible;
+            return show ? this.showGeofence() : this.hideGeofence();
+        },
+
+        /**
+         * Geofence çizimi görünür mü?
+         */
+        isGeofenceVisible: function () {
+            return !!this._geofenceVisible;
+        },
+
+        /**
+         * Geofence yeniden tanımlandığında çizimi tazele
+         */
+        refreshGeofenceLayer: function () {
+            var wasVisible = this._geofenceVisible;
+            if (this._geofenceLayer && this._map && this._map.hasLayer(this._geofenceLayer)) {
+                this._map.removeLayer(this._geofenceLayer);
+            }
+            this._geofenceLayer = null;
+            if (wasVisible) this.showGeofence();
+            return this;
+        },
+
+        /**
          * Birleşik kontrol panelini (Ayarlar + Loglar drawer) oluştur
          */
         addControlPanel: function () {
@@ -582,6 +660,11 @@
             // WeiYe panel
             if (this._features && this._features.weiYePanel) {
                 this.addWeiYeInfoControlToMap(map);
+            }
+
+            // Geofence çizimi (panel toggle'ı başlangıç durumunu okuyabilsin diye panelden önce)
+            if (this.options.drawGeofence) {
+                this.showGeofence();
             }
 
             // Birleşik kontrol paneli (Ayarlar + Loglar) — en son sarılmalı

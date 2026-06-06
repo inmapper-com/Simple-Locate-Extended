@@ -95,19 +95,11 @@
             { lat: 37.424592, lng: 31.851272 }   // Sol alt
         ];
 
-        // Geofence'i haritada göster
-        L.polygon(geofencePolygon.map(p => [p.lat, p.lng]), {
-            color: '#1976d2',
-            weight: 2,
-            fillColor: '#1976d2',
-            fillOpacity: 0.1,
-            dashArray: '5, 5'
-        }).addTo(map).bindPopup('📍 Geofence Alanı');
-
         // SimpleLocate Extended'ı başlat
         const locateControl = L.simplelocate({
             position: 'topright',
             geofence: { polygon: geofencePolygon },
+            drawGeofence: true,          // Geofence'i plugin çizsin (panelden aç/kapat)
             advancedFiltering: true,
             indoorMode: true,
             controlPanel: true,          // Birleşik Ayarlar + Loglar drawer'ı

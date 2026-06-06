@@ -807,6 +807,11 @@
         this._toggle(fs, 'Fallback Marker Soluklaştır', o.fadeMarkerOnFallback !== false, function (v) {
             self._setFeature('fadeMarkerOnFallback', v, function () { ctrl.options.fadeMarkerOnFallback = v; });
         });
+        if (typeof ctrl.toggleGeofence === 'function') {
+            this._toggle(fs, 'Geofence Çizimi', ctrl.isGeofenceVisible(), function (v) {
+                ctrl.toggleGeofence(v);
+            });
+        }
 
         // --- Filtre Parametreleri ---
         var fp = this._section(pane, 'Filtre Parametreleri');
