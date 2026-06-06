@@ -1649,29 +1649,39 @@
             // Wei Ye algoritması ile konumu filtrele
             const filteredPosition = this._applyWeiYeFilter(event);
             
-            // Konum reddedildiyse (null döndü) - marker güncellenmez, circle gösterilmez
+            // Konum reddedildiyse (null döndü) — PDR veya son iyi konum varsa göster
             if (!filteredPosition) {
-                // Reddedilen konum - marker ve circle gösterilmeyecek
+                if (this._pdr.active) {
+                    this._isFallbackLocation = true;
+                    this._latitude = this._pdr.currentLatitude;
+                    this._longitude = this._pdr.currentLongitude;
+                    this._accuracy = this._pdr.currentAccuracy;
+                    this._updateMarker();
+                    return;
+                }
+                if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
+                    this._isFallbackLocation = true;
+                    this._latitude = this._lastGoodLocation.latitude;
+                    this._longitude = this._lastGoodLocation.longitude;
+                    this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
+                    this._updateMarker();
+                    return;
+                }
 
-                // Ham konum bilgileri alınsa bile circle göstermiyoruz (kullanıcı talebi)
-                // Sadece varsa marker'ı kaldır
                 if (this._marker) {
                     this._map.removeLayer(this._marker);
                     this._marker = undefined;
                 }
-
-                // Eğer circle varsa, kaldır (alan dışı circle artık gösterilmeyecek)
                 if (this._circle) {
                     this._map.removeLayer(this._circle);
                     this._circle = undefined;
                 }
 
-                // Callback'i çağır - ham GPS verisini de ekle (WeiYe panel teşhis bilgisi gösterebilsin)
                 if (this.options.afterDeviceMove) {
                     this.options.afterDeviceMove({
-                        lat: this._latitude || event.latitude,
-                        lng: this._longitude || event.longitude,
-                        accuracy: this._accuracy || event.accuracy,
+                        lat: event.latitude,
+                        lng: event.longitude,
+                        accuracy: event.accuracy,
                         angle: this._angle,
                         isFiltered: true,
                         isRejected: true,
@@ -1681,7 +1691,8 @@
                         locationStats: this._locationStats,
                         isFallback: false,
                         isIndoorMode: this.options.indoorMode,
-                        consecutiveBadLocations: this._consecutiveBadLocations
+                        consecutiveBadLocations: this._consecutiveBadLocations,
+                        updateKind: 'reject'
                     });
                 }
                 return;
@@ -1814,7 +1825,7 @@
             this._lastOrientationTime = Date.now();
 
             document.documentElement.style.setProperty("--leaflet-simple-locate-orientation", -this._angle + "deg");
-            this._updateMarker();
+            this._updateMarker({ orientationOnly: true });
         },
         
         // Gimbal Lock korumalı pusula hesaplama
@@ -2176,7 +2187,8 @@
                     angle: this._angle,
                     isPDR: true,
                     pdrStepCount: 0,
-                    pdrActive: true
+                    pdrActive: true,
+                    updateKind: 'pdr'
                 });
             }
         },
@@ -2317,41 +2329,26 @@
         
         // Bir adım algılandı - konum güncelle
         _onStepDetected: function () {
-            this._pdr.stepCount++;
-            
             // Heading (pusula yönü) mevcut mu?
             var heading = this._angle;
             if (heading === undefined || heading === null) {
-                // Heading yoksa PDR çalışamaz - son konumu koru
-                // PDR: Heading verisi yok
                 return;
             }
-            
-            // Adım uzunluğu
+
             var stepLength = this.options.pdrStepLength;
-            
-            // Heading'i radyana çevir (0° = Kuzey, saat yönünde artar)
             var headingRad = heading * (Math.PI / 180);
-            
-            // Mevcut konumdan adım uzunluğu kadar heading yönünde ilerle
-            // Enlem: 1 derece ≈ 111,320 metre
-            // Boylam: 1 derece ≈ 111,320 × cos(enlem) metre
             var latOffset = (stepLength * Math.cos(headingRad)) / 111320;
             var lngOffset = (stepLength * Math.sin(headingRad)) / (111320 * Math.cos(this._pdr.currentLatitude * Math.PI / 180));
-            
+
             var newLat = this._pdr.currentLatitude + latOffset;
             var newLng = this._pdr.currentLongitude + lngOffset;
-            
-            // Geofence sınır kontrolü - PDR konumu bina dışına çıkmasın
+
             var geofenceCheck = this._isInsideGeofence(newLat, newLng);
             if (!geofenceCheck.inside) {
-                // Bina sınırına ulaşıldı - konum güncellenmez ama PDR devam eder
-                // (kullanıcı geri dönebilir)
-                // PDR: Geofence sınırına ulaşıldı
                 return;
             }
-            
-            // Konumu güncelle
+
+            this._pdr.stepCount++;
             this._pdr.currentLatitude = newLat;
             this._pdr.currentLongitude = newLng;
             
@@ -2443,9 +2440,29 @@
             }
         },
 
-        _updateMarker: function () {
+        _updateMarker: function (opts) {
+            opts = opts || {};
+
+            // Geofence düzeltmesi callback'ten ÖNCE (loglama doğru fallback/PDR modunu görsün)
+            if (this._latitude && this._longitude && typeof this._isInsideGeofence === 'function') {
+                const markerGeofenceCheck = this._isInsideGeofence(this._latitude, this._longitude);
+                if (!markerGeofenceCheck.inside) {
+                    this._isFallbackLocation = true;
+                    if (this._pdr.active) {
+                        this._latitude = this._pdr.currentLatitude;
+                        this._longitude = this._pdr.currentLongitude;
+                        this._accuracy = this._pdr.currentAccuracy;
+                    } else if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
+                        this._latitude = this._lastGoodLocation.latitude;
+                        this._longitude = this._lastGoodLocation.longitude;
+                        this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
+                    }
+                }
+            }
+
             if (this.options.afterDeviceMove) {
-                // Callback fonksiyonunu çağır, filtrelenmiş konumu ve filtreleme istatistiklerini kullan
+                var updateKind = opts.orientationOnly ? 'orientation'
+                    : (this._pdr.active ? 'pdr' : 'position');
                 this.options.afterDeviceMove({
                     lat: this._latitude,
                     lng: this._longitude,
@@ -2454,41 +2471,26 @@
                     isFiltered: true,
                     isJump: this._weiYeState.isJumpDetected,
                     filterStats: this._weiYeState.filteringStats,
-                    // ========== İÇ MEKAN İYİLEŞTİRMELERİ - YENİ BİLGİLER ==========
                     confidence: this._lastGoodLocation.confidence,
                     locationStats: this._locationStats,
-                    isFallback: this._weiYeState.lastFilteredPosition?.isFallback || false,
+                    isFallback: !!this._isFallbackLocation,
                     isIndoorMode: this.options.indoorMode,
                     consecutiveBadLocations: this._consecutiveBadLocations,
-                    // ========== PDR BİLGİLERİ ==========
                     isPDR: this._pdr.active,
                     pdrStepCount: this._pdr.stepCount,
                     pdrAccuracy: this._pdr.currentAccuracy,
-                    // ========== ALTITUDE & KAT BİLGİLERİ ==========
                     altitude: this._altitude.filtered,
                     altitudeRaw: this._altitude.raw,
                     altitudeAccuracy: this._altitude.accuracy,
                     altitudePlatform: this._altitude.platform,
                     floor: this._altitude.floor,
-                    floorName: this._altitude.floorName
+                    floorName: this._altitude.floorName,
+                    updateKind: updateKind
                 });
             }
 
             if (!this._latitude || !this._longitude || (this.options.drawCircle && !this._accuracy)) {
                 return;
-            }
-            
-            // ========== EK GÜVENLİK: MARKER GÜNCELLENİRKEN DE GEOFENCE KONTROLÜ ==========
-            const markerGeofenceCheck = this._isInsideGeofence(this._latitude, this._longitude);
-            if (!markerGeofenceCheck.inside) {
-                this._isFallbackLocation = true;
-                if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
-                    this._latitude = this._lastGoodLocation.latitude;
-                    this._longitude = this._lastGoodLocation.longitude;
-                    this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
-                } else {
-                    return;
-                }
             }
 
             let icon_type;

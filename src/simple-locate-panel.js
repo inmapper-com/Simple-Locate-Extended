@@ -101,7 +101,16 @@
         '.slp-btn-full.cancel{background:#e5e7eb;color:#374151;}.slp-btn-full.cancel:hover{background:#d1d5db;}' +
         '.slp-btn-full.ghost{background:#f3f4f6;color:#6b7280;}.slp-btn-full.ghost:hover{background:#e5e7eb;}' +
         '.slp-hint{font-size:11px;color:#6b7280;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;' +
-        'padding:7px 9px;margin-top:8px;line-height:1.4;}';
+        'padding:7px 9px;margin-top:8px;line-height:1.4;}' +
+        '.slp-float-status{position:fixed;top:max(10px,env(safe-area-inset-top,0px));left:50%;' +
+        'transform:translateX(-50%);z-index:99998;pointer-events:none;font-family:system-ui,-apple-system,sans-serif;}' +
+        '.slp-float-pill{display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;' +
+        'background:rgba(17,24,39,.88);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);' +
+        'box-shadow:0 2px 14px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.08);}' +
+        '.slp-float-pill .slp-badge{font-size:11px;padding:4px 10px;border-radius:10px;letter-spacing:.2px;}' +
+        '.slp-float-meta{font-size:11px;font-weight:600;color:#d1d5db;font-variant-numeric:tabular-nums;}' +
+        '.slp-float-gf{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.35px;padding:2px 7px;' +
+        'border-radius:8px;background:rgba(255,255,255,.08);}';
 
         var style = document.createElement('style');
         style.id = STYLE_ID;
@@ -182,6 +191,8 @@
             rejAccuracy: 0,
             rejSpeed: 0,
             fallbackUpdates: 0,
+            orientationUpdates: 0,
+            displayUpdates: 0,
             pdrSteps: 0,
             jumps: 0,
             drSessions: 0,
@@ -192,7 +203,52 @@
         // Önceki core istatistik snapshot'ı (red sebebi tespiti için)
         this._prevCoreStats = this._snapshotCoreStats();
         this._lastRaw = null;
+        this._lastPosKey = null;
+        this._lastAngle = null;
     }
+
+    LocateLogger.prototype._posKey = function (payload) {
+        if (!payload || payload.lat == null || payload.lng == null) return null;
+        return Math.round(payload.lat * 1e6) + ':' + Math.round(payload.lng * 1e6) + ':' +
+            Math.round((payload.accuracy || 0) * 10);
+    };
+
+    LocateLogger.prototype._resolveDisplayMode = function (payload) {
+        var ctrl = this.ctrl;
+        var isPDR = !!(payload.isPDR || (ctrl && ctrl._pdr && ctrl._pdr.active));
+        var isFallback = !!(payload.isFallback || (ctrl && ctrl._isFallbackLocation));
+        var rawOutside = this.state.geofenceInside === false;
+
+        if (isPDR) return 'pdr';
+        if (isFallback) return 'fallback';
+        if (rawOutside) return 'fallback';
+        return 'real';
+    };
+
+    LocateLogger.prototype._isOrientationOnly = function (payload) {
+        if (payload.updateKind === 'orientation') return true;
+        if (payload.updateKind === 'reject') return false;
+        if (payload.lat == null || payload.lng == null) return true;
+        var key = this._posKey(payload);
+        if (key && key === this._lastPosKey) return true;
+        return false;
+    };
+
+    LocateLogger.prototype._applyModeChange = function (mode, now) {
+        if (mode === this.state.mode) return;
+        var prevDur = now - this.state.modeSince;
+        if (this.stats.modeDurations[this.state.mode] != null) {
+            this.stats.modeDurations[this.state.mode] += prevDur;
+        }
+        var mi = MODE_INFO[mode] || MODE_INFO.idle;
+        var pmi = MODE_INFO[this.state.mode] || MODE_INFO.idle;
+        var lvl = mode === 'real' ? 'success' : (mode === 'rejected' ? 'error' : 'warn');
+        this.log('system', lvl,
+            'Durum değişti: ' + pmi.label + ' → ' + mi.label + ' (önceki ' + fmtDur(prevDur) + ' sürdü)',
+            { from: this.state.mode, to: mode, prevDurationMs: prevDur });
+        this.state.mode = mode;
+        this.state.modeSince = now;
+    };
 
     LocateLogger.prototype._snapshotCoreStats = function () {
         var s = (this.ctrl && this.ctrl._locationStats) || {};
@@ -293,11 +349,20 @@
 
     // PDR adımı algılandı
     LocateLogger.prototype.noteStep = function (info) {
+        if (info.moved === false) {
+            this.log('step', 'warn',
+                'Adım algılandı ama konum güncellenmedi' +
+                (info.blockedReason ? ' (' + info.blockedReason + ')' : ''),
+                { heading: info.heading != null ? num(info.heading, 0) + '°' : '--',
+                  lat: info.lat, lng: info.lng, accuracy: info.accuracy,
+                  blockedReason: info.blockedReason });
+            this._notify();
+            return;
+        }
         this.stats.pdrSteps++;
         if (this.drSession) this.drSession.steps++;
         this.log('step', 'info',
-            'PDR adım #' + (info.stepCount != null ? info.stepCount : this.stats.pdrSteps) +
-            (info.moved === false ? ' (sınırda, konum sabit)' : ''),
+            'PDR adım #' + (info.stepCount != null ? info.stepCount : this.stats.pdrSteps),
             { stepCount: info.stepCount, heading: info.heading != null ? num(info.heading, 0) + '°' : '--',
               lat: info.lat, lng: info.lng, accuracy: info.accuracy });
     };
@@ -307,21 +372,11 @@
         if (!payload) return;
         var ctrl = this.ctrl;
         var now = Date.now();
-
-        // ----- Mod tespiti -----
-        var isPDR = !!(payload.isPDR || (ctrl && ctrl._pdr && ctrl._pdr.active));
         var isRejected = !!payload.isRejected;
-        var isFallback = !!(payload.isFallback || (ctrl && ctrl._isFallbackLocation));
-        var mode;
-        if (isPDR) mode = 'pdr';
-        else if (isRejected) mode = 'rejected';
-        else if (isFallback) mode = 'fallback';
-        else mode = 'real';
-
-        // ----- Geofence durumu (gösterilen konum; raw durumu noteRawFix'te izlenir) -----
         var inside = this.state.geofenceInside;
+        var orientationOnly = !isRejected && this._isOrientationOnly(payload);
 
-        // ----- Red sebebi tespiti (core stat diff) -----
+        // ----- Red olayı (gösterim modundan ayrı) -----
         if (isRejected) {
             this.stats.rejected++;
             var cur = this._snapshotCoreStats();
@@ -332,58 +387,74 @@
             else if (cur.speedRejections > prev.speedRejections) { reason = 'aşırı hız (sıçrama)'; this.stats.rejSpeed++; }
             if (payload.locationError) reason = 'GPS hatası: ' + payload.locationError.message;
             this.log('reject', payload.locationError ? 'error' : 'warn',
-                'Konum reddedildi — ' + reason,
+                'Ham GPS reddedildi — ' + reason,
                 { lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy, reason: reason });
-        } else {
-            this.stats.accepted++;
+            this._prevCoreStats = cur;
+
+            var displayMode = this._resolveDisplayMode(payload);
+            if (ctrl && ctrl._pdr && ctrl._pdr.active) {
+                displayMode = 'pdr';
+            } else if (payload.lat != null && payload.lng != null && displayMode !== 'real') {
+                displayMode = 'fallback';
+            } else if (payload.lat == null || payload.lng == null) {
+                displayMode = 'rejected';
+            }
+            this._applyModeChange(displayMode, now);
+            this._notify();
+            return;
         }
+
+        // ----- Yön güncellemesi (konum değişmedi — log gürültüsünü kes) -----
+        if (orientationOnly) {
+            this.stats.orientationUpdates++;
+            if (this._lastPosKey || this.state.mode !== 'idle') {
+                this._applyModeChange(this._resolveDisplayMode(payload), now);
+            }
+            this._lastAngle = payload.angle;
+            this._notify();
+            return;
+        }
+
+        // ----- Gerçek konum güncellemesi -----
+        this.stats.accepted++;
+        this.stats.displayUpdates++;
         this._prevCoreStats = this._snapshotCoreStats();
 
-        // ----- Jump tespiti -----
         if (payload.isJump) {
             this.stats.jumps++;
             this.log('filter', 'warn', 'Ani sıçrama (jump) tespit edildi ve filtrelendi',
                 { lat: payload.lat, lng: payload.lng });
         }
 
-        // ----- Mod geçişi -----
-        if (mode !== this.state.mode) {
-            var prevDur = now - this.state.modeSince;
-            if (this.stats.modeDurations[this.state.mode] != null) {
-                this.stats.modeDurations[this.state.mode] += prevDur;
-            }
-            var mi = MODE_INFO[mode] || MODE_INFO.idle;
-            var pmi = MODE_INFO[this.state.mode] || MODE_INFO.idle;
-            var lvl = mode === 'real' ? 'success' : (mode === 'rejected' ? 'error' : 'warn');
-            this.log('system', lvl,
-                'Durum değişti: ' + pmi.label + ' → ' + mi.label + ' (önceki ' + fmtDur(prevDur) + ' sürdü)',
-                { from: this.state.mode, to: mode, prevDurationMs: prevDur });
-            this.state.mode = mode;
-            this.state.modeSince = now;
-        }
+        var mode = this._resolveDisplayMode(payload);
+        this._applyModeChange(mode, now);
 
-        // ----- Fallback sayacı -----
         if (mode === 'fallback') this.stats.fallbackUpdates++;
 
-        // ----- Konum güncelleme kaydı (kompakt) -----
-        if (!isRejected) {
-            var parts = [];
-            parts.push('acc ' + num(payload.accuracy, 1) + 'm');
-            if (payload.confidence != null) parts.push('güven %' + num(payload.confidence, 0));
-            if (payload.floorName) parts.push(payload.floorName);
-            else if (payload.floor != null) parts.push('kat ' + payload.floor);
-            if (payload.angle != null) parts.push(num(payload.angle, 0) + '°');
-            var mlabel = (MODE_INFO[mode] || MODE_INFO.idle).label;
-            this.log('location', mode === 'real' ? 'success' : 'info',
-                mlabel + ' güncellendi · ' + parts.join(' · '),
-                {
-                    lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy,
-                    confidence: payload.confidence, mode: mode, geofenceInside: inside,
-                    floor: payload.floor, floorName: payload.floorName, angle: payload.angle,
-                    altitude: payload.altitude, isPDR: isPDR, pdrStepCount: payload.pdrStepCount
-                });
-        }
+        var parts = [];
+        parts.push('acc ' + num(payload.accuracy, 1) + 'm');
+        if (payload.confidence != null) parts.push('güven %' + num(payload.confidence, 0));
+        if (payload.floorName) parts.push(payload.floorName);
+        else if (payload.floor != null) parts.push('kat ' + payload.floor);
+        if (payload.angle != null) parts.push(num(payload.angle, 0) + '°');
+        if (payload.pdrStepCount != null && payload.isPDR) parts.push('adım ' + payload.pdrStepCount);
 
+        var mlabel = (MODE_INFO[mode] || MODE_INFO.idle).label;
+        var lvl = mode === 'real' ? 'success' : 'info';
+        var gfHint = inside === false && mode !== 'real' ? ' · ham sinyal dışarıda' : '';
+
+        this.log('location', lvl,
+            mlabel + ' güncellendi · ' + parts.join(' · ') + gfHint,
+            {
+                lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy,
+                confidence: payload.confidence, mode: mode, geofenceInside: inside,
+                floor: payload.floor, floorName: payload.floorName, angle: payload.angle,
+                altitude: payload.altitude, isPDR: payload.isPDR, pdrStepCount: payload.pdrStepCount,
+                updateKind: payload.updateKind
+            });
+
+        this._lastPosKey = this._posKey(payload);
+        this._lastAngle = payload.angle;
         this._notify();
     };
 
@@ -403,9 +474,13 @@
 
     // ----- Export -----
     LocateLogger.prototype.exportJSON = function () {
+        var stats = Object.assign({}, this.stats);
+        if (this.drSession) {
+            stats.drTotalMs += Date.now() - this.drSession.start;
+        }
         return JSON.stringify({
             exportedAt: new Date().toISOString(),
-            stats: this.stats,
+            stats: stats,
             entries: this.entries
         }, null, 2);
     };
@@ -456,6 +531,7 @@
         // Canlı durum/süre sayaçları için periyodik güncelleme
         var self = this;
         this._tick = setInterval(function () {
+            self._renderFloatStatus();
             if (self.open && self.activeTab === 'logs') self._renderLiveStatus();
         }, 500);
     }
@@ -510,18 +586,27 @@
             };
         }
 
-        // PDR adım
+        // PDR adımı algılandı
         if (typeof ctrl._onStepDetected === 'function') {
             var origStep = ctrl._onStepDetected;
             ctrl._onStepDetected = function () {
-                var before = this._pdr ? { lat: this._pdr.currentLatitude, lng: this._pdr.currentLongitude } : null;
+                var before = this._pdr ? {
+                    lat: this._pdr.currentLatitude,
+                    lng: this._pdr.currentLongitude,
+                    stepCount: this._pdr.stepCount
+                } : null;
                 var r = origStep.apply(this, arguments);
-                if (this._pdr) {
-                    var moved = before && (before.lat !== this._pdr.currentLatitude || before.lng !== this._pdr.currentLongitude);
+                if (this._pdr && before) {
+                    var moved = this._pdr.stepCount > before.stepCount;
+                    var blocked = !moved && this._angle == null;
                     logger.noteStep({
-                        stepCount: this._pdr.stepCount, heading: this._angle,
-                        lat: this._pdr.currentLatitude, lng: this._pdr.currentLongitude,
-                        accuracy: this._pdr.currentAccuracy, moved: moved
+                        stepCount: this._pdr.stepCount,
+                        heading: this._angle,
+                        lat: this._pdr.currentLatitude,
+                        lng: this._pdr.currentLongitude,
+                        accuracy: this._pdr.currentAccuracy,
+                        moved: moved,
+                        blockedReason: blocked ? 'pusula yok' : (!moved ? 'geofence sınırı' : null)
                     });
                 }
                 return r;
@@ -531,7 +616,11 @@
         // afterDeviceMove — ana güncelleme akışı
         var origADM = ctrl.options ? ctrl.options.afterDeviceMove : null;
         ctrl.options.afterDeviceMove = function (loc) {
-            try { logger.ingestUpdate(loc); } catch (e) {}
+            var enriched = loc;
+            if (typeof ctrl._enrichLocationPayload === 'function') {
+                try { enriched = ctrl._enrichLocationPayload(loc); } catch (e) {}
+            }
+            try { logger.ingestUpdate(enriched); } catch (e) {}
             if (typeof origADM === 'function') {
                 try { return origADM.apply(this, arguments); } catch (e) {}
             }
@@ -549,6 +638,12 @@
         this.handle.title = 'Konum Paneli';
         this.handle.addEventListener('click', function () { self.toggle(); });
         document.body.appendChild(this.handle);
+
+        // Üst orta — canlı durum chip'i (panel kapalıyken de görünür)
+        this.floatStatusEl = document.createElement('div');
+        this.floatStatusEl.className = 'slp-float-status';
+        this.floatStatusEl.innerHTML = '<div class="slp-float-pill"></div>';
+        document.body.appendChild(this.floatStatusEl);
 
         // Drawer
         this.drawer = document.createElement('div');
@@ -584,6 +679,7 @@
         }
 
         this._switchTab(this.activeTab);
+        this._renderFloatStatus();
     };
 
     SimpleLocatePanel.prototype._makeTab = function (label, id) {
@@ -706,6 +802,29 @@
         this._renderLogs();
     };
 
+    SimpleLocatePanel.prototype._renderFloatStatus = function () {
+        if (!this.floatStatusEl) return;
+        var pill = this.floatStatusEl.querySelector('.slp-float-pill');
+        if (!pill) return;
+
+        var s = this.logger.getLiveStatus();
+        var mi = MODE_INFO[s.mode] || MODE_INFO.idle;
+        var html = '<span class="slp-badge" style="background:' + mi.color + '">' + mi.label + '</span>';
+        html += '<span class="slp-float-meta">' + fmtDur(s.modeFor) + '</span>';
+
+        if (s.geofenceInside === false) {
+            html += '<span class="slp-float-gf" style="color:#fcd34d">DIŞARIDA</span>';
+        } else if (s.geofenceInside === true) {
+            html += '<span class="slp-float-gf" style="color:#86efac">İÇERİDE</span>';
+        }
+
+        if (s.drActive && s.drSteps > 0) {
+            html += '<span class="slp-float-meta" style="color:#c4b5fd">· ' + s.drSteps + ' adım</span>';
+        }
+
+        pill.innerHTML = html;
+    };
+
     SimpleLocatePanel.prototype._renderLiveStatus = function () {
         if (!this.statusEl) return;
         var s = this.logger.getLiveStatus();
@@ -728,14 +847,13 @@
         var st = this.logger.stats;
         var items = [
             [st.rawFixes, 'Ham GPS'],
-            [st.accepted, 'Kabul'],
+            [st.displayUpdates || st.accepted, 'Gösterim'],
             [st.rejected, 'Red'],
-            [st.rejGeofence, 'Alan dışı'],
-            [st.rejAccuracy, 'Düşük doğr.'],
-            [st.rejSpeed, 'Hız ihlali'],
+            [st.fallbackUpdates, 'Son iyi'],
             [st.pdrSteps, 'PDR adım'],
             [st.drSessions, 'DR oturum'],
-            [fmtDur(st.drTotalMs), 'Top. DR']
+            [fmtDur(st.drTotalMs + (this.logger.drSession ? Date.now() - this.logger.drSession.start : 0)), 'Top. DR'],
+            [st.orientationUpdates || 0, 'Yön (sessiz)']
         ];
         var html = '';
         for (var i = 0; i < items.length; i++) {
@@ -785,6 +903,7 @@
             ? function (fn) { window.requestAnimationFrame(fn); }
             : function (fn) { window.setTimeout(fn, 16); };
         this.logger.onChange(function () {
+            self._renderFloatStatus();
             if (!self.open || self.activeTab !== 'logs') return;
             if (self._renderScheduled) return;
             self._renderScheduled = true;
@@ -1141,6 +1260,7 @@
         if (this._drawing) this._teardownDraw();
         if (this._tick) clearInterval(this._tick);
         if (this.handle && this.handle.parentNode) this.handle.parentNode.removeChild(this.handle);
+        if (this.floatStatusEl && this.floatStatusEl.parentNode) this.floatStatusEl.parentNode.removeChild(this.floatStatusEl);
         if (this.drawer && this.drawer.parentNode) this.drawer.parentNode.removeChild(this.drawer);
     };
 
