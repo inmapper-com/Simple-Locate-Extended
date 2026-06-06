@@ -51,8 +51,12 @@
                 weiYePanel: !!options.weiYePanel,
                 settingsControl: !!options.settingsControl,
                 deadReckoning: !!options.enableDeadReckoning,
-                fadeMarkerOnFallback: options.fadeMarkerOnFallback !== false
+                fadeMarkerOnFallback: options.fadeMarkerOnFallback !== false,
+                controlPanel: !!options.controlPanel
             };
+
+            // Birleşik kontrol paneli (Ayarlar + Loglar drawer) ayarları
+            this._panelOptions = options.panelOptions || {};
 
             // Ayarlar kontrolünü oluştur
             if (this._features.settingsControl) {
@@ -538,6 +542,33 @@
         },
 
         /**
+         * Birleşik kontrol panelini (Ayarlar + Loglar drawer) oluştur
+         */
+        addControlPanel: function () {
+            if (this._controlPanel) return this._controlPanel;
+            if (typeof window.SimpleLocatePanel !== 'function') {
+                console.warn('SimpleLocatePanel bulunamadı. simple-locate-panel.js dosyasını dahil edin.');
+                return null;
+            }
+            this._controlPanel = new window.SimpleLocatePanel(this, this._panelOptions);
+            return this._controlPanel;
+        },
+
+        /**
+         * Kontrol paneli örneğini al
+         */
+        getPanel: function () {
+            return this._controlPanel || null;
+        },
+
+        /**
+         * Log motoru örneğini al
+         */
+        getLogger: function () {
+            return this._controlPanel ? this._controlPanel.logger : null;
+        },
+
+        /**
          * Plugin'i haritaya ekle (override)
          */
         addTo: function (map) {
@@ -551,6 +582,11 @@
             // WeiYe panel
             if (this._features && this._features.weiYePanel) {
                 this.addWeiYeInfoControlToMap(map);
+            }
+
+            // Birleşik kontrol paneli (Ayarlar + Loglar) — en son sarılmalı
+            if (this._features && this._features.controlPanel) {
+                this.addControlPanel();
             }
 
             return control;
