@@ -91,7 +91,17 @@
         '.slp-log.lv-warn .m{color:#fcd34d;}' +
         '.slp-log.lv-error .m{color:#fca5a5;}' +
         '.slp-empty{color:#475569;text-align:center;padding:24px 10px;font-style:italic;}' +
-        '.slp-logs-pane{display:flex;flex-direction:column;height:100%;}';
+        '.slp-logs-pane{display:flex;flex-direction:column;height:100%;}' +
+        '.slp-btn-row{display:flex;gap:6px;margin-top:8px;}' +
+        '.slp-btn-full{flex:1;padding:8px 10px;border:none;border-radius:6px;font-size:12px;font-weight:600;' +
+        'cursor:pointer;background:#e0e7ff;color:#3730a3;transition:background .15s;}' +
+        '.slp-btn-full:hover{background:#c7d2fe;}' +
+        '.slp-btn-full.draw{background:#e91e63;color:#fff;}.slp-btn-full.draw:hover{background:#c2185b;}' +
+        '.slp-btn-full.ok{background:#16a34a;color:#fff;}.slp-btn-full.ok:hover{background:#15803d;}' +
+        '.slp-btn-full.cancel{background:#e5e7eb;color:#374151;}.slp-btn-full.cancel:hover{background:#d1d5db;}' +
+        '.slp-btn-full.ghost{background:#f3f4f6;color:#6b7280;}.slp-btn-full.ghost:hover{background:#e5e7eb;}' +
+        '.slp-hint{font-size:11px;color:#6b7280;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;' +
+        'padding:7px 9px;margin-top:8px;line-height:1.4;}';
 
         var style = document.createElement('style');
         style.id = STYLE_ID;
@@ -807,10 +817,10 @@
         this._toggle(fs, 'Fallback Marker Soluklaştır', o.fadeMarkerOnFallback !== false, function (v) {
             self._setFeature('fadeMarkerOnFallback', v, function () { ctrl.options.fadeMarkerOnFallback = v; });
         });
+
+        // --- Geofence (görünürlük + interaktif çizim) ---
         if (typeof ctrl.toggleGeofence === 'function') {
-            this._toggle(fs, 'Geofence Çizimi', ctrl.isGeofenceVisible(), function (v) {
-                ctrl.toggleGeofence(v);
-            });
+            this._buildGeofenceSection(pane);
         }
 
         // --- Filtre Parametreleri ---
@@ -856,6 +866,203 @@
             try { this.ctrl.enableFeature(name, v); return; } catch (e) {}
         }
         if (fallback) fallback();
+    };
+
+    // ---- Geofence bölümü (görünürlük + interaktif çizim) ----
+    SimpleLocatePanel.prototype._buildGeofenceSection = function (pane) {
+        var self = this;
+        var ctrl = this.ctrl;
+        var sec = this._section(pane, 'Geofence');
+
+        // Görünürlük toggle
+        this._toggle(sec, 'Geofence Çizimini Göster', ctrl.isGeofenceVisible(), function (v) {
+            ctrl.toggleGeofence(v);
+        });
+
+        // Çizim butonları satırı
+        this._gfDrawBtn = document.createElement('button');
+        this._gfDrawBtn.className = 'slp-btn-full draw';
+        this._gfDrawBtn.textContent = '✏️ Haritada Çiz';
+        this._gfDrawBtn.addEventListener('click', function () {
+            if (self._drawing) self._finishDrawGeofence();
+            else self._startDrawGeofence();
+        });
+
+        this._gfCancelBtn = document.createElement('button');
+        this._gfCancelBtn.className = 'slp-btn-full cancel';
+        this._gfCancelBtn.textContent = '✕ İptal';
+        this._gfCancelBtn.style.display = 'none';
+        this._gfCancelBtn.addEventListener('click', function () { self._cancelDrawGeofence(); });
+
+        var row1 = document.createElement('div');
+        row1.className = 'slp-btn-row';
+        row1.appendChild(this._gfDrawBtn);
+        row1.appendChild(this._gfCancelBtn);
+        sec.appendChild(row1);
+
+        // Yardımcı butonlar
+        var clearBtn = document.createElement('button');
+        clearBtn.className = 'slp-btn-full ghost';
+        clearBtn.textContent = '🗑 Temizle';
+        clearBtn.addEventListener('click', function () { self._clearGeofence(); });
+
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'slp-btn-full ghost';
+        copyBtn.textContent = '⬇ Koordinatları Kopyala';
+        copyBtn.addEventListener('click', function () { self._copyGeofence(copyBtn); });
+
+        var row2 = document.createElement('div');
+        row2.className = 'slp-btn-row';
+        row2.appendChild(clearBtn);
+        row2.appendChild(copyBtn);
+        sec.appendChild(row2);
+
+        // İpucu metni (çizim sırasında görünür)
+        this._gfHint = document.createElement('div');
+        this._gfHint.className = 'slp-hint';
+        this._gfHint.style.display = 'none';
+        sec.appendChild(this._gfHint);
+    };
+
+    SimpleLocatePanel.prototype._startDrawGeofence = function () {
+        var self = this;
+        var map = this.ctrl._map;
+        if (!map) return;
+
+        this._drawing = true;
+        this._drawPoints = [];
+        this._drawVertices = [];
+        if (this._drawPreview) { map.removeLayer(this._drawPreview); this._drawPreview = null; }
+
+        // Mevcut geofence çizimini gizle (karışmasın)
+        this._gfWasVisible = this.ctrl.isGeofenceVisible();
+        this.ctrl.hideGeofence();
+
+        map.getContainer().style.cursor = 'crosshair';
+        if (map.doubleClickZoom) map.doubleClickZoom.disable();
+        this._drawClickHandler = function (e) { self._onDrawClick(e); };
+        map.on('click', this._drawClickHandler);
+
+        this._gfDrawBtn.className = 'slp-btn-full ok';
+        this._gfDrawBtn.textContent = '✓ Bitir (0)';
+        this._gfCancelBtn.style.display = '';
+        this._gfHint.style.display = '';
+        this._gfHint.textContent = 'Haritaya tıklayarak köşe noktalarını ekle. En az 3 nokta gerekli, sonra "Bitir"e bas.';
+
+        if (this.logger) this.logger.log('geofence', 'info', 'Geofence çizim modu başladı', null);
+    };
+
+    SimpleLocatePanel.prototype._onDrawClick = function (e) {
+        var map = this.ctrl._map;
+        var ll = e.latlng;
+        this._drawPoints.push({ lat: ll.lat, lng: ll.lng });
+
+        var v = L.circleMarker(ll, {
+            radius: 5, color: '#fff', weight: 2,
+            fillColor: '#e91e63', fillOpacity: 1, interactive: false
+        }).addTo(map);
+        this._drawVertices.push(v);
+
+        var latlngs = this._drawPoints.map(function (p) { return [p.lat, p.lng]; });
+        if (!this._drawPreview) {
+            this._drawPreview = L.polygon(latlngs, {
+                color: '#e91e63', weight: 2, dashArray: '5, 5',
+                fillColor: '#e91e63', fillOpacity: 0.08, interactive: false
+            }).addTo(map);
+        } else {
+            this._drawPreview.setLatLngs(latlngs);
+        }
+
+        this._gfDrawBtn.textContent = '✓ Bitir (' + this._drawPoints.length + ')';
+    };
+
+    SimpleLocatePanel.prototype._finishDrawGeofence = function () {
+        var map = this.ctrl._map;
+        if (this._drawPoints.length < 3) {
+            this._gfHint.textContent = 'En az 3 nokta gerekli (' + this._drawPoints.length + ' eklendi).';
+            return;
+        }
+        var points = this._drawPoints.slice();
+
+        // Geofence'i uygula
+        if (typeof this.ctrl.setGeofence === 'function') {
+            this.ctrl.setGeofence({ polygon: points });
+        } else {
+            this.ctrl.options.geofencePolygon = points;
+        }
+        if (typeof this.ctrl.refreshGeofenceLayer === 'function') this.ctrl.refreshGeofenceLayer();
+        this.ctrl.showGeofence();
+
+        this._teardownDraw();
+        if (this.logger) {
+            this.logger.log('geofence', 'success',
+                'Yeni geofence çizildi (' + points.length + ' nokta) ve uygulandı', { points: points });
+        }
+    };
+
+    SimpleLocatePanel.prototype._cancelDrawGeofence = function () {
+        this._teardownDraw();
+        if (this._gfWasVisible) this.ctrl.showGeofence();
+        if (this.logger) this.logger.log('geofence', 'info', 'Geofence çizimi iptal edildi', null);
+    };
+
+    SimpleLocatePanel.prototype._teardownDraw = function () {
+        var map = this.ctrl._map;
+        this._drawing = false;
+        if (map && this._drawClickHandler) map.off('click', this._drawClickHandler);
+        this._drawClickHandler = null;
+        if (map) {
+            map.getContainer().style.cursor = '';
+            if (map.doubleClickZoom) map.doubleClickZoom.enable();
+        }
+        if (this._drawVertices && map) {
+            this._drawVertices.forEach(function (v) { map.removeLayer(v); });
+        }
+        this._drawVertices = [];
+        if (this._drawPreview && map) { map.removeLayer(this._drawPreview); this._drawPreview = null; }
+        this._drawPoints = [];
+
+        if (this._gfDrawBtn) {
+            this._gfDrawBtn.className = 'slp-btn-full draw';
+            this._gfDrawBtn.textContent = '✏️ Haritada Çiz';
+        }
+        if (this._gfCancelBtn) this._gfCancelBtn.style.display = 'none';
+        if (this._gfHint) this._gfHint.style.display = 'none';
+    };
+
+    SimpleLocatePanel.prototype._clearGeofence = function () {
+        if (this._drawing) this._teardownDraw();
+        this.ctrl.hideGeofence();
+        this.ctrl.options.geofencePolygon = null;
+        this.ctrl.options.geofenceBounds = null;
+        this.ctrl.options.geofenceCenter = null;
+        this.ctrl.options.geofenceRadius = null;
+        if (this.ctrl._geofenceCache) this.ctrl._geofenceCache.isInside = null;
+        if (typeof this.ctrl.refreshGeofenceLayer === 'function') this.ctrl.refreshGeofenceLayer();
+        if (this.logger) this.logger.log('geofence', 'warn', 'Geofence temizlendi', null);
+    };
+
+    SimpleLocatePanel.prototype._copyGeofence = function (btn) {
+        var poly = this.ctrl.options.geofencePolygon;
+        if (!poly || !poly.length) {
+            btn.textContent = 'Geofence yok';
+            var self0 = this;
+            setTimeout(function () { btn.textContent = '⬇ Koordinatları Kopyala'; }, 1500);
+            return;
+        }
+        var lines = poly.map(function (p) {
+            return '    { lat: ' + p.lat.toFixed(6) + ', lng: ' + p.lng.toFixed(6) + ' }';
+        });
+        var text = 'const geofencePolygon = [\n' + lines.join(',\n') + '\n];';
+        var done = function () {
+            btn.textContent = '✓ Kopyalandı';
+            setTimeout(function () { btn.textContent = '⬇ Koordinatları Kopyala'; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, done);
+        } else {
+            done();
+        }
     };
 
     SimpleLocatePanel.prototype._section = function (pane, title) {
@@ -931,6 +1138,7 @@
     };
 
     SimpleLocatePanel.prototype.destroy = function () {
+        if (this._drawing) this._teardownDraw();
         if (this._tick) clearInterval(this._tick);
         if (this.handle && this.handle.parentNode) this.handle.parentNode.removeChild(this.handle);
         if (this.drawer && this.drawer.parentNode) this.drawer.parentNode.removeChild(this.drawer);
