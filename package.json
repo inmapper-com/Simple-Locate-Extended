@@ -1,0 +1,12 @@
+{
+  "name": "leaflet-simple-locate-extended",
+  "version": "1.2.0",
+  "description": "Leaflet tabanlı iç/dış mekan konum takip eklentisi: GPS filtreleme, geofence, PDR (dead reckoning), yükseklik/kat tespiti, yön algılama ve kontrol paneli.",
+  "license": "MIT",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "terser": "^5.31.0"
+  }
+}

@@ -8,9 +8,12 @@ Leaflet tabanlı iç/dış mekan konum takip eklentisi. GPS filtreleme, geofence
 src/
 ├── low-pass-filter.js            # UMD low-pass filtre modülü
 ├── leaflet-simple-locate.js      # Ana Leaflet control (filtreleme, PDR, altitude)
-└── simple-locate-extended.js     # Extended API katmanı (runtime kontrol, ayarlar paneli)
+├── simple-locate-extended.js     # Extended API katmanı (runtime kontrol, geofence çizim)
+└── simple-locate-panel.js        # Birleşik kontrol paneli (Ayarlar + Loglar drawer)
+dist/                             # Minified çıktılar (npm run build ile üretilir)
 images/                           # SVG ikonlar (geolocation, orientation, spinner)
 index.html                        # Demo sayfası
+build.js                          # Minify build script'i (terser)
 ```
 
 ## Bağımlılıklar
@@ -19,12 +22,33 @@ index.html                        # Demo sayfası
 |-----------|----------|--------|
 | Leaflet   | 1.9.4    | CDN    |
 
-Paket yöneticisi kullanılmaz. Script'ler sırayla yüklenir:
+Çalışma zamanında paket yöneticisi gerekmez. Script'ler sırayla yüklenir:
 
 ```html
 <script src="src/low-pass-filter.js"></script>
 <script src="src/leaflet-simple-locate.js"></script>
 <script src="src/simple-locate-extended.js"></script>
+<script src="src/simple-locate-panel.js"></script>
+```
+
+## Build / Minify
+
+Üretim için minified sürümler `terser` ile oluşturulur:
+
+```bash
+npm install
+npm run build
+```
+
+Çıktılar `dist/` altına yazılır:
+
+- `dist/<dosya>.min.js` — her kaynak için ayrı minified sürüm
+- `dist/simple-locate.bundle.min.js` — doğru yükleme sırasıyla birleşik tek dosya (~54% daha küçük)
+
+Tek dosya ile kullanım:
+
+```html
+<script src="dist/simple-locate.bundle.min.js"></script>
 ```
 
 ## Temel Kullanım

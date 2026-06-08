@@ -1,8 +1,9 @@
 /*
- * Leaflet.SimpleLocate Extended v1.1.0 - 2026-02-03
+ * Leaflet.SimpleLocate Extended v1.2.0 - 2026-06-08
  *
  * Based on original work by mfhsieh (v1.0.5)
- * Extended with Wei Ye filtering, Geofence, Indoor optimizations
+ * Extended with Wei Ye filtering, Geofence, Indoor optimizations,
+ * PDR (dead reckoning), altitude/floor detection, control panel.
  *
  * Licensed under the MIT license.
  *
@@ -186,6 +187,7 @@
 
             minAngleChange: 3,
             orientationSmoothing: 5,        // Yön yumuşatma için örnek sayısı (jitter azaltma)
+            orientationUpdateInterval: 100, // Yön kaynaklı marker/callback güncellemesi min aralığı (ms, ~10Hz)
             gimbalLockThreshold: 70,        // Beta açısı bu değeri aşınca gimbal lock koruması aktif (derece)
             clickTimeoutDelay: 500,
 
@@ -232,10 +234,6 @@
             
             // Konum Geçerleme
             enablePositionValidation: true, // Konum doğrulama aktif
-            positionValidationStrict: false, // Katı mod - şüpheli konumları tamamen reddet
-            
-            // Marker görünürlük eşiği (metre)
-            markerVisibilityThreshold: 30, // Accuracy bu değerin altındaysa marker gösterilir
             
             // ========== RENK ÖZELLEŞTİRME ==========
             markerColor: '#000000',         // Marker iç nokta rengi
@@ -377,12 +375,18 @@
         initialize: function (options) {
             L.Util.setOptions(this, options);
 
+            // Kat tanımları verildiyse tutarlılığını doğrula (çakışma/boşluk uyarısı)
+            if (this.options.floors) {
+                this._validateFloors(this.options.floors);
+            }
+
             // map related
             this._map = undefined;
             this._button = undefined;
             this._marker = undefined;
             this._circle = undefined;
             this._circleStyleInterval = undefined;
+            this._isZooming = false;
 
             // button state
             this._clicked = undefined;
@@ -1396,7 +1400,6 @@
 
         _onClick: async function () {
             if (this._clickTimeout) {
-                // console.log("_onClick: double click", new Date().toISOString());
                 clearTimeout(this._clickTimeout);
                 this._clickTimeout = undefined;
 
@@ -1414,11 +1417,16 @@
                 }
             } else {
                 this._clickTimeout = setTimeout(() => {
-                    // console.log("_onClick: single click", new Date().toISOString());
                     clearTimeout(this._clickTimeout);
                     this._clickTimeout = undefined;
 
                     if (!this._map) return;
+
+                    // iOS 13+ devicemotion izni — PDR için, AYRI buton yok: konum butonuna
+                    // her dokunuşta (kullanıcı jesti içinde) izin verilene kadar yeniden denenir.
+                    if (this.options.enableDeadReckoning && this._motionGranted !== true) {
+                        this._checkMotion();
+                    }
 
                     if (this._clicked && this.options.setViewAfterClick) {
                         this._setView();
@@ -1579,6 +1587,54 @@
             });
         },
 
+        // iOS 13+ için devicemotion (ivmeölçer) izni — PDR adım sayımı buna bağlı.
+        // DeviceOrientation izninden AYRIDIR ve kullanıcı hareketi (tıklama) içinde istenmelidir.
+        _checkMotion: function () {
+            if (typeof DeviceMotionEvent === "undefined") return Promise.resolve(false);
+
+            // iOS dışı / eski tarayıcılar: izin gerekmez, doğrudan kullanılabilir
+            if (typeof DeviceMotionEvent.requestPermission !== "function") {
+                this._motionGranted = true;
+                this._fireMotionPermissionChange();
+                return Promise.resolve(true);
+            }
+
+            return DeviceMotionEvent.requestPermission().then((permission) => {
+                this._motionGranted = (permission === "granted");
+                if (this._motionGranted) this._motionWarned = false;
+                this._fireMotionPermissionChange();
+                return this._motionGranted;
+            }).catch(() => {
+                this._motionGranted = false;
+                this._fireMotionPermissionChange();
+                return false;
+            });
+        },
+
+        _fireMotionPermissionChange: function () {
+            if (typeof this.options.onMotionPermissionChange === 'function') {
+                try { this.options.onMotionPermissionChange(this.getMotionPermissionState()); } catch (e) {}
+            }
+        },
+
+        // Motion izninin durumu: 'granted' | 'denied' | 'unknown' | 'not-required'
+        getMotionPermissionState: function () {
+            if (typeof DeviceMotionEvent === "undefined") return 'denied';
+            if (typeof DeviceMotionEvent.requestPermission !== "function") {
+                return this._motionGranted === false ? 'denied' : 'not-required';
+            }
+            if (this._motionGranted === true) return 'granted';
+            if (this._motionGranted === false) return 'denied';
+            return 'unknown';
+        },
+
+        // Dışarıdan motion iznini iste (kullanıcı jesti içinden çağrılmalı).
+        // Ayrı bir buton GEREKMEZ — konum butonu da bunu tetikler; bu yalnızca
+        // programatik kullanım/entegrasyon içindir.
+        requestMotionPermission: function () {
+            return this._checkMotion();
+        },
+
         _watchGeolocation: function () {
             this._map.locate({ watch: true, enableHighAccuracy: true });
             this._map.on("locationfound", this._onLocationFound, this);
@@ -1633,12 +1689,10 @@
         },
 
         _watchOrientation: function () {
-            // console.log("_watchOrientation");
             L.DomEvent.on(window, "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation", this._onOrientation, this);
         },
 
         _unwatchOrientation: function () {
-            // console.log("_unwatchOrientation");
             L.DomEvent.off(window, "ondeviceorientationabsolute" in window ? "deviceorientationabsolute" : "deviceorientation", this._onOrientation, this);
             document.documentElement.style.setProperty("--leaflet-simple-locate-orientation", "0deg");
             this._angle = undefined;
@@ -1829,8 +1883,19 @@
             this._angle = (smoothedAngle + 360) % 360;
             this._lastOrientationTime = Date.now();
 
+            // Görsel dönüş her olayda CSS değişkeniyle yapılır (pürüzsüz kalır).
             document.documentElement.style.setProperty("--leaflet-simple-locate-orientation", -this._angle + "deg");
-            this._updateMarker({ orientationOnly: true });
+
+            // _updateMarker (callback + geofence + marker reposition) ~10Hz throttle edilir.
+            // Konum değişmediği için sık çağrı gereksiz CPU/pil tüketir.
+            var nowMs = Date.now();
+            var minInterval = this.options.orientationUpdateInterval || 100;
+            if (!this._marker ||
+                this._lastOrientationMarkerUpdate === undefined ||
+                nowMs - this._lastOrientationMarkerUpdate >= minInterval) {
+                this._lastOrientationMarkerUpdate = nowMs;
+                this._updateMarker({ orientationOnly: true });
+            }
         },
         
         // Gimbal Lock korumalı pusula hesaplama
@@ -2024,6 +2089,50 @@
             return medianAltitude;
         },
         
+        // Kat tanımlarını doğrula — geçersiz aralık, çakışma ve boşlukları uyar.
+        // (Sessiz yanlış kat tespitini önler.)
+        _validateFloors: function (floors) {
+            if (!Array.isArray(floors) || floors.length === 0) {
+                console.warn('[SimpleLocate] floors boş veya dizi değil — kat tespiti devre dışı kalabilir.');
+                return false;
+            }
+
+            var ok = true;
+            var ranges = [];
+            for (var i = 0; i < floors.length; i++) {
+                var f = floors[i];
+                if (f == null || typeof f.minAlt !== 'number' || typeof f.maxAlt !== 'number') {
+                    console.warn('[SimpleLocate] floors[' + i + '] geçersiz: minAlt/maxAlt sayı olmalı.', f);
+                    ok = false;
+                    continue;
+                }
+                if (f.minAlt >= f.maxAlt) {
+                    console.warn('[SimpleLocate] floors[' + i + '] ("' + (f.name || f.floor) +
+                        '"): minAlt (' + f.minAlt + ') >= maxAlt (' + f.maxAlt + ').');
+                    ok = false;
+                }
+                ranges.push({ min: f.minAlt, max: f.maxAlt, label: (f.name || ('Kat ' + f.floor)) });
+            }
+
+            // Aralıkları sırala ve çakışma/boşluk kontrolü yap
+            ranges.sort(function (a, b) { return a.min - b.min; });
+            for (var j = 1; j < ranges.length; j++) {
+                var prev = ranges[j - 1];
+                var cur = ranges[j];
+                if (cur.min < prev.max) {
+                    console.warn('[SimpleLocate] Kat aralıkları çakışıyor: "' + prev.label +
+                        '" [' + prev.min + ',' + prev.max + ') ile "' + cur.label +
+                        '" [' + cur.min + ',' + cur.max + ').');
+                    ok = false;
+                } else if (cur.min > prev.max) {
+                    console.warn('[SimpleLocate] Kat aralıklarında boşluk var: "' + prev.label +
+                        '" bitişi (' + prev.max + ') ile "' + cur.label +
+                        '" başlangıcı (' + cur.min + ') arası tanımsız.');
+                }
+            }
+            return ok;
+        },
+
         // Kat tespiti
         _detectFloor: function (altitude) {
             var floor = null;
@@ -2146,7 +2255,17 @@
         _startDeadReckoning: function () {
             if (!this.options.enableDeadReckoning) return;
             if (this._pdr.active) return; // Zaten aktif
-            
+
+            // iOS'ta devicemotion izni verilmemişse adım sayımı çalışmaz → uyar ve çık
+            if (this._motionGranted === false) {
+                if (!this._motionWarned) {
+                    this._motionWarned = true;
+                    console.warn('[SimpleLocate] PDR başlatılamadı: devicemotion izni yok (iOS). ' +
+                        'Konum butonuna tekrar dokunup hareket sensörü iznini onaylayın.');
+                }
+                return;
+            }
+
             // Baz konum: son bilinen geçerli iç mekan konumu
             var baseLat = this._latitude;
             var baseLng = this._longitude;
@@ -2399,16 +2518,22 @@
         },
 
         _onZoomStart: function () {
-            if (this._circle) document.documentElement.style.setProperty("--leaflet-simple-locate-circle-display", "none");
+            // Zoom animasyonu boyunca circle/marker'a setLatLng/setRadius ÇAĞIRMA.
+            // Leaflet bu katmanları animasyonla zaten doğru taşır; animasyon ortasında
+            // yeniden projelendirme yaparsak "kayma" oluşur (zoomend'de düzelir).
+            this._isZooming = true;
         },
 
         _onZoomEnd: function () {
-            if (this._circle) document.documentElement.style.setProperty("--leaflet-simple-locate-circle-display", "inline");
+            this._isZooming = false;
+            // Animasyon bitti; konum/circle'ı nihai harita durumuna göre senkronla.
+            if (this._latitude && this._longitude) {
+                this._updateMarker();
+            }
         },
 
         _onLayerAdd: function (event) {
             if (this.options.afterMarkerAdd && event.layer == this._marker) {
-                // console.log("_onLayerAdd", new Date().toISOString(), event.layer.icon_name ? event.layer.icon_name : "undefined", event.layer);
                 this.options.afterMarkerAdd();
             }
         },
@@ -2501,6 +2626,12 @@
             }
 
             if (!this._latitude || !this._longitude || (this.options.drawCircle && !this._accuracy)) {
+                return;
+            }
+
+            // Zoom animasyonu sırasında circle/marker'ı yeniden konumlandırma (kayma önlenir).
+            // Leaflet mevcut katmanları animasyonla taşır; _onZoomEnd nihai senkronu yapar.
+            if (this._isZooming) {
                 return;
             }
 

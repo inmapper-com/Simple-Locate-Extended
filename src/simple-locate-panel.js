@@ -12,7 +12,7 @@
  * dokunmadan instance metodlarını sararak olayları yakalar.
  *
  * @requires leaflet-simple-locate.js
- * @version 1.0.0
+ * @version 1.2.0
  */
 (function () {
     'use strict';
@@ -562,6 +562,7 @@
 
     // ---- Core instance metodlarını sar (olayları yakala) ----
     SimpleLocatePanel.prototype._hookControl = function () {
+        var self = this;
         var ctrl = this.ctrl;
         var logger = this.logger;
         if (!ctrl || ctrl._slpHooked) return;
@@ -637,6 +638,17 @@
             };
         }
 
+        // Motion izni değişince paneldeki durum göstergesini güncelle
+        var prevMotionCb = ctrl.options ? ctrl.options.onMotionPermissionChange : null;
+        if (ctrl.options) {
+            ctrl.options.onMotionPermissionChange = function (state) {
+                try { self._renderMotionStatus(); } catch (e) {}
+                if (typeof prevMotionCb === 'function') {
+                    try { return prevMotionCb.apply(this, arguments); } catch (e) {}
+                }
+            };
+        }
+
         // PDR sinyal teşhisi (saniyede bir) — adım sayılmama nedenini görmek için
         if (typeof ctrl._pdrSampleTick === 'function') {
             var origTick = ctrl._pdrSampleTick;
@@ -646,18 +658,26 @@
             };
         }
 
-        // afterDeviceMove — ana güncelleme akışı
-        var origADM = ctrl.options ? ctrl.options.afterDeviceMove : null;
-        ctrl.options.afterDeviceMove = function (loc) {
-            var enriched = loc;
-            if (typeof ctrl._enrichLocationPayload === 'function') {
-                try { enriched = ctrl._enrichLocationPayload(loc); } catch (e) {}
-            }
-            try { logger.ingestUpdate(enriched); } catch (e) {}
-            if (typeof origADM === 'function') {
-                try { return origADM.apply(this, arguments); } catch (e) {}
-            }
-        };
+        // Konum güncelleme akışı.
+        // Extended katmanı varsa onDeviceMove aboneliğini kullan (zenginleştirme orada
+        // BİR KEZ yapılır; çift sarma/çift hesaplama olmaz). Yoksa option'ı sar (fallback).
+        if (typeof ctrl.onDeviceMove === 'function') {
+            ctrl.onDeviceMove(function (enriched) {
+                try { logger.ingestUpdate(enriched); } catch (e) {}
+            });
+        } else {
+            var origADM = ctrl.options ? ctrl.options.afterDeviceMove : null;
+            ctrl.options.afterDeviceMove = function (loc) {
+                var enriched = loc;
+                if (typeof ctrl._enrichLocationPayload === 'function') {
+                    try { enriched = ctrl._enrichLocationPayload(loc); } catch (e) {}
+                }
+                try { logger.ingestUpdate(enriched); } catch (e) {}
+                if (typeof origADM === 'function') {
+                    try { return origADM.apply(this, arguments); } catch (e) {}
+                }
+            };
+        }
     };
 
     // ---- DOM kurulumu ----
@@ -931,6 +951,32 @@
         return ('' + s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     };
 
+    SimpleLocatePanel.prototype._renderMotionStatus = function () {
+        if (!this._motionStatusEl) return;
+        var ctrl = this.ctrl;
+        var state = typeof ctrl.getMotionPermissionState === 'function'
+            ? ctrl.getMotionPermissionState() : 'unknown';
+        var el = this._motionStatusEl;
+        el.style.display = '';
+        if (state === 'granted' || state === 'not-required') {
+            el.style.background = '#dcfce7';
+            el.style.borderColor = '#86efac';
+            el.style.color = '#166534';
+            el.innerHTML = '✓ Hareket sensörü etkin — PDR adım sayımı çalışabilir.';
+        } else if (state === 'denied') {
+            el.style.background = '#fee2e2';
+            el.style.borderColor = '#fca5a5';
+            el.style.color = '#991b1b';
+            el.innerHTML = '✕ Hareket sensörü izni reddedildi. <b>Konum butonuna</b> tekrar dokunup ' +
+                'izni onaylayın (iOS). Reddettiyseniz Ayarlar → Safari → Hareket ve Yön erişimini açın.';
+        } else {
+            el.style.background = '#fef3c7';
+            el.style.borderColor = '#fde68a';
+            el.style.color = '#92400e';
+            el.innerHTML = '⏳ Hareket sensörü izni bekleniyor. PDR için <b>konum butonuna</b> dokunun.';
+        }
+    };
+
     SimpleLocatePanel.prototype._bindLogger = function () {
         var self = this;
         var schedule = window.requestAnimationFrame
@@ -964,6 +1010,11 @@
         this._toggle(fs, 'Dead Reckoning (PDR)', !!o.enableDeadReckoning, function (v) {
             self._setFeature('deadReckoning', v, function () { ctrl.options.enableDeadReckoning = v; });
         });
+        // Hareket sensörü izni durumu (yalnızca bilgi — ayrı buton yok, konum butonu tetikler)
+        this._motionStatusEl = document.createElement('div');
+        this._motionStatusEl.className = 'slp-hint';
+        fs.appendChild(this._motionStatusEl);
+        this._renderMotionStatus();
         this._toggle(fs, 'Son İyi Konum Fallback', o.enableLastGoodLocation !== false, function (v) {
             self._setFeature('lastGoodLocation', v, function () { ctrl.options.enableLastGoodLocation = v; });
         });

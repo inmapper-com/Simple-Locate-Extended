@@ -3,7 +3,7 @@
  * GPS/Geolocation verilerindeki yüksek frekanslı gürültüyü azaltır
  * 
  * @author SimpleLocate Team
- * @version 1.0.0
+ * @version 1.2.0
  */
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
