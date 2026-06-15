@@ -1,5 +1,5 @@
 /*
- * Leaflet.SimpleLocate Extended v1.2.0 - 2026-06-08
+ * Leaflet.SimpleLocate Extended v1.3.0 - 2026-06-15
  *
  * Based on original work by mfhsieh (v1.0.5)
  * Extended with Wei Ye filtering, Geofence, Indoor optimizations,
@@ -189,6 +189,16 @@
             orientationSmoothing: 5,        // Yön yumuşatma için örnek sayısı (jitter azaltma)
             orientationUpdateInterval: 100, // Yön kaynaklı marker/callback güncellemesi min aralığı (ms, ~10Hz)
             gimbalLockThreshold: 70,        // Beta açısı bu değeri aşınca gimbal lock koruması aktif (derece)
+            // ── Jiroskop / tamamlayıcı filtre (heading füzyonu) ──
+            // Pusula (uzun vadeli, manyetik bozulmaya açık) + jiroskop (kısa vadeli, sürüklenir)
+            // birleştirilir: jiroskop dönüşü kısa vadede takip eder, pusula yavaşça düzeltir.
+            // Yalnızca devicemotion aktifken (PDR sırasında) ve jiroskop verisi tazeyken çalışır;
+            // aksi halde saf pusulaya döner. GÜVENLİK: füzyon pusuladan
+            // headingGyroMaxDivergence'tan fazla ayrılırsa otomatik pusulaya kilitlenir.
+            headingGyroFusion: true,        // Jiroskop füzyonu aktif
+            headingGyroSign: -1,            // rotationRate.alpha → heading işaret düzeltmesi (+1/-1)
+            headingCompassCorrection: 0.1,  // Her pusula örneğinde pusulaya çekme oranı (0-1)
+            headingGyroMaxDivergence: 25,   // Bu açıyı (derece) aşınca pusulaya kilitlen (güvenlik)
             clickTimeoutDelay: 500,
 
             setViewAfterClick: true,
@@ -225,6 +235,8 @@
             enableLastGoodLocation: true, // Kötü konum geldiğinde son iyi konumu kullan
             lastGoodLocationTimeout: 30000, // Son iyi konum ne kadar süre geçerli (ms)
             maxConsecutiveBadLocations: 5, // Kaç kötü konum sonrası zorla güncelle
+            fallbackHysteresisMs: 2500,   // Gerçek ↔ fallback görünümü arası geçiş için kararlılık süresi (ms)
+                                          // (geofence sınırında salınan filtrelenmiş konumun mod titretmesini engeller)
             
             // İç Mekan Optimizasyonları
             indoorMode: true,             // İç mekan modu aktif
@@ -253,7 +265,9 @@
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
             pdrStepLength: 0.65,            // Ortalama adım uzunluğu (metre)
-            pdrStepThreshold: 1.0,          // High-pass ivme zirvesi için eşik (m/s²) - adaptif baz değeri
+            pdrStepThreshold: 0.8,          // High-pass ivme zirvesi için eşik (m/s²) - adaptif baz değeri
+                                            // (iOS saha logları: yürüyüş zirveleri 0.73-0.99 aralığında
+                                            //  başlıyor; 1.0 başlangıç eşiği ilk ~6 sn adımları kaçırıyordu)
             pdrStepCooldown: 300,           // İki adım arası minimum süre (ms)
             pdrMinPeakValue: 0.7,           // Zirvenin minimum büyüklüğü (çok küçük zirveleri reddet)
             pdrAdaptiveThreshold: true,     // Dinamik eşik kullan
@@ -261,6 +275,21 @@
             pdrMaxSteps: 100,               // PDR ile maksimum adım sayısı
             pdrAccuracyDecay: 0.5,          // Her adımda accuracy ne kadar artar (metre)
             pdrInitialAccuracy: 5,          // PDR başlangıç accuracy (metre)
+            // ── Dinamik adım uzunluğu (Weinberg modeli) ──
+            // Sabit adım uzunluğu yerine her adımın ivme genliğinden uzunluk kestirir:
+            //   stepLength = K · ⁴√(a_max − a_min)
+            // Hızlı/yavaş yürüyüşte mesafe doğruluğunu belirgin artırır. Kapalıyken
+            // pdrStepLength sabit değeri kullanılır (eski davranış).
+            pdrDynamicStepLength: true,     // Dinamik adım uzunluğu aktif
+            pdrStepLengthFactor: 0.5,       // Weinberg K katsayısı (cihaza göre kalibre edilebilir)
+            pdrStepLengthMin: 0.4,          // Alt sınır (m) - saçma küçük değerleri engeller
+            pdrStepLengthMax: 0.9,          // Üst sınır (m) - saçma büyük değerleri engeller
+            // ── PDR→GPS yumuşak yeniden giriş ──
+            // İç mekan sinyali geri gelince konum, sürüklenmiş PDR tahmininden gerçek GPS'e
+            // tek seferde sıçramak yerine birkaç güncellemede yumuşakça yaklaşır.
+            pdrReentrySmoothing: true,      // Yumuşak yeniden giriş aktif
+            pdrReentryBlend: 0.5,           // Her GPS güncellemesinde hedefe yaklaşma oranı (0-1)
+            pdrReentrySnapDistance: 2,      // Bu mesafenin altına inince doğrudan otur (m)
             
             // ========== ALTITUDE NORMALİZASYON & KAT TESPİTİ ==========
             enableAltitude: false,          // Altitude işleme aktif (varsayılan kapalı)
@@ -404,6 +433,9 @@
             this._orientationCalibrated = false; // Kalibrasyon durumu
             this._lastReliableHeading = undefined; // Gimbal lock öncesi son güvenilir yön
             this._inGimbalLockZone = false;   // Gimbal lock bölgesinde mi
+            // Jiroskop/tamamlayıcı filtre durumu
+            this._fusedHeading = null;        // Füzyonlanmış heading (jiroskop + pusula)
+            this._lastGyroTime = 0;           // Son jiroskop örneği zamanı (tazelik kontrolü)
 
             this._lowPassFilterLat = null;
             this._lowPassFilterLng = null;
@@ -509,6 +541,10 @@
             
             // ========== FALLBACK LOCATION STATE ==========
             this._isFallbackLocation = false;
+            // Histerezis durumu: state = onaylanmış görünüm, candidate = bekleyen aday geçiş
+            this._fallbackHysteresis = { state: false, candidate: null, since: 0 };
+            // PDR→GPS yumuşak yeniden giriş durumu
+            this._reentry = { active: false, lat: null, lng: null };
             
             // ========== PEDESTRIAN DEAD RECKONING (PDR) STATE ==========
             this._pdr = {
@@ -529,6 +565,7 @@
                 // ── Zirve algılama (histerezis + refrakter) ──
                 armed: false,
                 peakValue: 0,
+                valleyValue: 0,         // adım döngüsündeki en düşük sinyal (genlik için)
                 armTime: 0,
                 recentPeaks: [],
                 dynamicThreshold: 0,
@@ -904,6 +941,37 @@
             };
         },
         
+        // Fallback görünümüne giriş/çıkış histerezisi.
+        // İstenen durum (wantFallback) ancak fallbackHysteresisMs boyunca kararlı kalırsa
+        // onaylanır; böylece geofence sınırında salınan filtrelenmiş konum modu titretemez.
+        // Dönüş: true → istenen durum geçerli, çağıran devam edebilir; false → geçiş henüz
+        // kararlı değil, mevcut görünüm korunmalı.
+        _updateFallbackHysteresis: function (wantFallback) {
+            const h = this._fallbackHysteresis;
+            if (wantFallback === h.state) {
+                h.candidate = null;
+                return true;
+            }
+            const now = Date.now();
+            if (h.candidate !== wantFallback) {
+                h.candidate = wantFallback;
+                h.since = now;
+            }
+            if (now - h.since >= this.options.fallbackHysteresisMs) {
+                h.state = wantFallback;
+                h.candidate = null;
+                return true;
+            }
+            return false;
+        },
+
+        // Histerezisi atlayarak fallback durumunu anında uygula (kesin red durumları için)
+        _commitFallbackState: function (value) {
+            this._isFallbackLocation = value;
+            this._fallbackHysteresis.state = value;
+            this._fallbackHysteresis.candidate = null;
+        },
+
         // Konum istatistiklerini al
         getLocationStats: function () {
             return { ...this._locationStats };
@@ -941,7 +1009,6 @@
             
             const isIOSDevice = this._isIOS;
             const isIndoorMode = this.options.indoorMode;
-            const isLowAccuracy = position.accuracy > 20;
             
             // ========== ADIM 1: ACCURACY KONTROLÜ ==========
             if (this.options.enablePositionValidation && 
@@ -1004,6 +1071,13 @@
             // ═══ İÇ MEKAN SİNYALİ GERİ GELDİ → PDR DURDUR ═══
             if (this._pdr.active) {
                 // İç mekan sinyali geri geldi → PDR durduruluyor
+                // Yumuşak yeniden giriş: gösterilen PDR konumunu çıpa olarak sakla;
+                // gerçek GPS'e birkaç güncellemede yaklaşılacak (tek sıçrama yerine).
+                if (this.options.pdrReentrySmoothing && this._latitude && this._longitude) {
+                    this._reentry.active = true;
+                    this._reentry.lat = this._latitude;
+                    this._reentry.lng = this._longitude;
+                }
                 this._stopDeadReckoning("iç mekan sinyali geri geldi");
             }
             
@@ -1049,15 +1123,11 @@
                 this._kalmanFilter.R_lng = this.options.indoorKalmanR;
             }
             
-            // iOS'ta çok düşük accuracy ile gelen konumları filtrele (sadece önceki konum varsa)
-            if (isIOSDevice && position.accuracy > 45 && this._weiYeState.lastFilteredPosition) {
-                return {
-                    latitude: this._weiYeState.lastFilteredPosition.latitude,
-                    longitude: this._weiYeState.lastFilteredPosition.longitude,
-                    accuracy: this._weiYeState.lastFilteredPosition.accuracy,
-                    timestamp: position.timestamp
-                };
-            }
+            // NOT: Eskiden iOS'ta accuracy > 45m olan fix'ler tamamen yutulup önceki konum
+            // döndürülüyordu. Bina içinde iOS accuracy neredeyse hep > 45m olduğundan bu kural
+            // konumu kalıcı olarak donduruyordu (kaçış mekanizması yoktu). Kaldırıldı; düşük
+            // doğruluklu fix'ler artık aşağıdaki median + Kalman zincirinden geçiyor — Kalman R
+            // değeri accuracy ile orantılı yükseldiği için ağır yumuşatma zaten korunuyor.
 
             // İstatistikleri güncelle
             this._weiYeState.filteringStats.totalUpdates++;
@@ -1505,6 +1575,14 @@
             
             // Kötü konum sayacı sıfırla
             this._consecutiveBadLocations = 0;
+
+            // Fallback histerezisini sıfırla
+            this._isFallbackLocation = false;
+            this._fallbackHysteresis.state = false;
+            this._fallbackHysteresis.candidate = null;
+
+            // Yeniden giriş yumuşatmasını sıfırla
+            this._reentry.active = false;
             
             // Konum geçmişi sıfırla
             this._locationHistory = {
@@ -1702,6 +1780,8 @@
             this._compassUncalibratedWarned = false;
             this._lastReliableHeading = undefined;
             this._inGimbalLockZone = false;
+            this._fusedHeading = null;
+            this._lastGyroTime = 0;
         },
 
         _onLocationFound: function (event) {
@@ -1711,7 +1791,7 @@
             // Konum reddedildiyse (null döndü) — PDR veya son iyi konum varsa göster
             if (!filteredPosition) {
                 if (this._pdr.active) {
-                    this._isFallbackLocation = true;
+                    this._commitFallbackState(true);
                     this._latitude = this._pdr.currentLatitude;
                     this._longitude = this._pdr.currentLongitude;
                     this._accuracy = this._pdr.currentAccuracy;
@@ -1719,7 +1799,7 @@
                     return;
                 }
                 if (this._lastGoodLocation.latitude && this._lastGoodLocation.longitude) {
-                    this._isFallbackLocation = true;
+                    this._commitFallbackState(true);
                     this._latitude = this._lastGoodLocation.latitude;
                     this._longitude = this._lastGoodLocation.longitude;
                     this._accuracy = this._lastGoodLocation.accuracy || this._accuracy;
@@ -1765,8 +1845,14 @@
             const finalGeofenceCheck = this._isInsideGeofence(filteredPosition.latitude, filteredPosition.longitude);
             if (!finalGeofenceCheck.inside) {
                 this._locationStats.geofenceRejections++;
+
+                // Histerezis: sınırdan tek tük dışarı sapan fix'lerde hemen fallback'e geçme;
+                // sapma kararlı hale gelene kadar son görüntülenen konum korunur
+                if (!this._updateFallbackHysteresis(true)) {
+                    return;
+                }
                 this._isFallbackLocation = true;
-                
+
                 // Dead reckoning başlat (aktif değilse)
                 if (this.options.enableDeadReckoning && !this._pdr.active) {
                     this._startDeadReckoning();
@@ -1790,21 +1876,44 @@
             }
             
             // Geofence içinde — gerçek GPS konumu
+            // Histerezis: fallback'ten gerçek konuma dönüş de kararlılık ister;
+            // onaylanana kadar fallback görünümü korunur
+            if (!this._updateFallbackHysteresis(false)) {
+                return;
+            }
             this._isFallbackLocation = false;
 
+            // PDR→GPS yumuşak yeniden giriş: hedef GPS konumuna kademeli yaklaş
+            var targetLat = filteredPosition.latitude;
+            var targetLng = filteredPosition.longitude;
+            if (this._reentry.active) {
+                var gap = L.latLng(this._reentry.lat, this._reentry.lng)
+                    .distanceTo(L.latLng(targetLat, targetLng));
+                if (gap <= this.options.pdrReentrySnapDistance) {
+                    // Yeterince yaklaşıldı → doğrudan otur, yeniden girişi bitir
+                    this._reentry.active = false;
+                } else {
+                    var b = this.options.pdrReentryBlend;
+                    this._reentry.lat = this._reentry.lat + (targetLat - this._reentry.lat) * b;
+                    this._reentry.lng = this._reentry.lng + (targetLng - this._reentry.lng) * b;
+                    targetLat = this._reentry.lat;
+                    targetLng = this._reentry.lng;
+                }
+            }
+
             // Önceki filtrelenmiş konumla aynıysa güncelleme yapma (micro değişiklikleri engelle)
-            if (this._latitude && filteredPosition.latitude &&
-                Math.round(this._latitude * 1000000) === Math.round(filteredPosition.latitude * 1000000) &&
-                this._longitude && filteredPosition.longitude &&
-                Math.round(this._longitude * 1000000) === Math.round(filteredPosition.longitude * 1000000) &&
+            if (this._latitude && targetLat &&
+                Math.round(this._latitude * 1000000) === Math.round(targetLat * 1000000) &&
+                this._longitude && targetLng &&
+                Math.round(this._longitude * 1000000) === Math.round(targetLng * 1000000) &&
                 this._accuracy && filteredPosition.accuracy &&
                 Math.round(this._accuracy * 100) === Math.round(filteredPosition.accuracy * 100)) {
                 return;
             }
 
             // Filtrelenmiş değerleri kaydet
-            this._latitude = filteredPosition.latitude;
-            this._longitude = filteredPosition.longitude;
+            this._latitude = targetLat;
+            this._longitude = targetLng;
             this._accuracy = filteredPosition.accuracy;
             
             // ========== ALTITUDE İŞLEME ==========
@@ -1879,8 +1988,10 @@
                 return;
             }
             this._orientationCalibrated = false;
-            
-            this._angle = (smoothedAngle + 360) % 360;
+
+            // Jiroskop füzyonu: pusula değerini referans alıp füzyonlanmış heading'i üret
+            // (jiroskop tazeyse), aksi halde saf pusula döner.
+            this._angle = (this._fuseHeading((smoothedAngle + 360) % 360) + 360) % 360;
             this._lastOrientationTime = Date.now();
 
             // Görsel dönüş her olayda CSS değişkeniyle yapılır (pürüzsüz kalır).
@@ -1976,6 +2087,34 @@
             while (delta > 180) delta -= 360;
             while (delta < -180) delta += 360;
             return delta;
+        },
+
+        // Tamamlayıcı filtre: pusula heading'ini referans alır.
+        // - Jiroskop verisi yoksa/bayatsa veya füzyon kapalıysa: saf pusula (eski davranış)
+        // - Jiroskop tazeyse: _fusedHeading'i (jiroskopla entegre edilmiş) pusulaya doğru
+        //   nazikçe çeker. GÜVENLİK: pusuladan headingGyroMaxDivergence'tan fazla ayrılırsa
+        //   (yanlış eksen/işaret veya jiroskop sürüklenmesi) doğrudan pusulaya kilitlenir.
+        _fuseHeading: function (compassHeading) {
+            var now = Date.now();
+            var gyroFresh = this.options.headingGyroFusion &&
+                this._lastGyroTime && (now - this._lastGyroTime) < 500;
+
+            if (!gyroFresh || this._fusedHeading === null) {
+                this._fusedHeading = compassHeading;
+                return compassHeading;
+            }
+
+            var div = this._angleDelta(this._fusedHeading, compassHeading); // fused - compass
+            if (Math.abs(div) > (this.options.headingGyroMaxDivergence || 25)) {
+                // Güvenlik kilidi: çok ayrıştı → pusulaya geri otur
+                this._fusedHeading = compassHeading;
+                return compassHeading;
+            }
+
+            // Pusulaya doğru nazik düzeltme (uzun vadeli referans)
+            var gain = this.options.headingCompassCorrection || 0.1;
+            this._fusedHeading = (this._fusedHeading - gain * div + 360) % 360;
+            return this._fusedHeading;
         },
 
         // ════════════════════════════════════════════════════════
@@ -2275,6 +2414,9 @@
                 return;
             }
             
+            // Yeniden giriş yumuşatması varsa iptal et (yeniden dışarı çıkıldı)
+            this._reentry.active = false;
+
             this._pdr.active = true;
             this._pdr.startTime = Date.now();
             this._pdr.stepCount = 0;
@@ -2289,6 +2431,7 @@
             this._pdr.linearBuf = [];
             this._pdr.armed = false;
             this._pdr.peakValue = 0;
+            this._pdr.valleyValue = 0;
             this._pdr.armTime = 0;
             this._pdr.recentPeaks = [];
             this._pdr.dynamicThreshold = this.options.pdrStepThreshold;
@@ -2333,7 +2476,11 @@
             }
             
             // PDR durduruldu
-            
+
+            // Jiroskop füzyonunu sıfırla → heading saf pusulaya döner
+            this._lastGyroTime = 0;
+            this._fusedHeading = null;
+
             this._pdr.active = false;
         },
         
@@ -2373,6 +2520,22 @@
                 return;
             }
 
+            // ── Jiroskop entegrasyonu (tamamlayıcı filtre) ──
+            // rotationRate.alpha (z ekseni, deg/s) ile heading'i kısa vadede entegre et.
+            // Pusula düzeltmesi _fuseHeading içinde (her pusula örneğinde) uygulanır.
+            if (this.options.headingGyroFusion && event.rotationRate &&
+                event.rotationRate.alpha !== null && event.rotationRate.alpha !== undefined) {
+                var dtG = this._lastGyroTime ? (now - this._lastGyroTime) / 1000 : 0;
+                if (dtG > 0 && dtG < 0.5 && this._fusedHeading !== null) {
+                    var gsign = this.options.headingGyroSign || -1;
+                    this._fusedHeading = (this._fusedHeading + gsign * event.rotationRate.alpha * dtG + 360) % 360;
+                    this._angle = this._fusedHeading;
+                    document.documentElement.style.setProperty(
+                        "--leaflet-simple-locate-orientation", -this._angle + "deg");
+                }
+                this._lastGyroTime = now;
+            }
+
             var a = this._resolvePdrAccel(event);
             if (!a || a.x === null || a.x === undefined) return;
 
@@ -2409,10 +2572,12 @@
                 if (s > thHigh) {
                     this._pdr.armed = true;
                     this._pdr.peakValue = s;
+                    this._pdr.valleyValue = s;
                     this._pdr.armTime = now;
                 }
             } else {
                 if (s > this._pdr.peakValue) this._pdr.peakValue = s;
+                if (s < this._pdr.valleyValue) this._pdr.valleyValue = s;
 
                 if (s < thLow) {
                     // Tam bir zirve tamamlandı
@@ -2420,14 +2585,18 @@
                         now - this._pdr.lastStepTime > this.options.pdrStepCooldown) {
                         this._pdr.lastStepTime = now;
                         this._registerPdrPeak(this._pdr.peakValue);
-                        this._onStepDetected();
+                        // Genlik (zirve − vadi) dinamik adım uzunluğu için kullanılır
+                        var amplitude = this._pdr.peakValue - this._pdr.valleyValue;
+                        this._onStepDetected(amplitude);
                     }
                     this._pdr.armed = false;
                     this._pdr.peakValue = 0;
+                    this._pdr.valleyValue = 0;
                 } else if (now - this._pdr.armTime > 1500) {
                     // Güvenlik: çok uzun süre yüksekte kalındıysa (sürekli sarsıntı) sıfırla
                     this._pdr.armed = false;
                     this._pdr.peakValue = 0;
+                    this._pdr.valleyValue = 0;
                 }
             }
 
@@ -2466,15 +2635,29 @@
 
         // Teşhis kancası (panel sarar; çekirdekte no-op)
         _pdrSampleTick: function (info) {},
-        
+
+        // Adım uzunluğu kestirimi (Weinberg modeli)
+        // stepLength = K · ⁴√(a_max − a_min), [min, max] aralığında sınırlanır.
+        // Dinamik mod kapalıysa veya genlik geçersizse sabit pdrStepLength döner.
+        _computeStepLength: function (amplitude) {
+            if (!this.options.pdrDynamicStepLength ||
+                !amplitude || amplitude <= 0 || !isFinite(amplitude)) {
+                return this.options.pdrStepLength;
+            }
+            var len = this.options.pdrStepLengthFactor * Math.pow(amplitude, 0.25);
+            return Math.min(this.options.pdrStepLengthMax,
+                Math.max(this.options.pdrStepLengthMin, len));
+        },
+
         // Bir adım algılandı - konum güncelle
-        _onStepDetected: function () {
+        // amplitude: bu adımın ivme genliği (zirve − vadi); dinamik adım uzunluğu için
+        _onStepDetected: function (amplitude) {
             var heading = this._angle;
             if (heading === undefined || heading === null) {
                 return 'no_heading';
             }
 
-            var stepLength = this.options.pdrStepLength;
+            var stepLength = this._computeStepLength(amplitude);
             var headingRad = heading * (Math.PI / 180);
             var latOffset = (stepLength * Math.cos(headingRad)) / 111320;
             var lngOffset = (stepLength * Math.sin(headingRad)) / (111320 * Math.cos(this._pdr.currentLatitude * Math.PI / 180));
@@ -2583,7 +2766,11 @@
             if (this._latitude && this._longitude && typeof this._isInsideGeofence === 'function') {
                 const markerGeofenceCheck = this._isInsideGeofence(this._latitude, this._longitude);
                 if (!markerGeofenceCheck.inside) {
-                    this._isFallbackLocation = true;
+                    // Koordinat düzeltmesi her durumda yapılır; fallback bayrağı ise
+                    // histerezis onaylarsa değişir (mod titremesini engellemek için)
+                    if (this._updateFallbackHysteresis(true)) {
+                        this._isFallbackLocation = true;
+                    }
                     if (this._pdr.active) {
                         this._latitude = this._pdr.currentLatitude;
                         this._longitude = this._pdr.currentLongitude;

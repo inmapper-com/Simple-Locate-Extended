@@ -113,25 +113,24 @@ GPS sinyali kaybedildiğinde veya geofence dışına çıkıldığında ivmeöl�
 
 **Adım tespit algoritması:**
 
-Tam dalga formu doğrulama kullanır. Tek eşik geçişi yerine, bir adımın sayılması için sinyalin tam döngüsü gözlenir:
+İvme vektörünün normu (telefon yönünden bağımsız) alınır, yerçekimi yavaş bir EMA ile ayrılır (high-pass) ve histerezisli zirve algılama uygulanır. Tek eşik geçişi yerine sinyalin tam döngüsü gözlenir:
 
 ```
-Faz 1: İvme eşiği aşar → zirve fazına gir, peak değerini takip et
-Faz 2: İvme eşiğin %40'ının altına düşer → vadi tespit edildi
-Faz 3: İvme tekrar yükselmeye başlar → tam dalga = 1 adım
+Faz 1: Sinyal üst eşiği (thHigh) aşar → "armed", zirve ve vadi takibi başlar
+Faz 2: Sinyal alt eşiğin (thHigh × 0.5) altına düşer → tam dalga = 1 adım
 ```
-
-Bu yaklaşım, bir adımda oluşan çift zirveyi (ayak kalkma + yere basma) tek adım olarak sayar.
 
 Ek korumalar:
-- **Cooldown** (400ms) — iki adım arası minimum süre
-- **Minimum zirve büyüklüğü** (`pdrMinPeakValue: 0.8`) — küçük titreşimleri reddet
-- **Adaptive threshold** — son 8 zirvenin ortalamasına göre eşiği dinamik ayarla, farklı yürüyüş hızlarına adapte ol
-- **Buffer** (12 sample) — ivme verisini yumuşatarak gürültüyü bastır
-- **Güvenlik zamanlayıcı** — 2 saniyeden uzun süren sahte zirve fazını sıfırla
+- **Cooldown** (`pdrStepCooldown: 300ms`) — iki adım arası minimum süre
+- **Minimum zirve büyüklüğü** (`pdrMinPeakValue: 0.7`) — küçük titreşimleri reddet
+- **Adaptive threshold** — son 6 zirvenin ortalamasına göre eşiği dinamik ayarla (`[base×0.6, base×1.4]` aralığında sınırlı), farklı yürüyüş hızlarına adapte ol
+- **Yumuşatma buffer'ı** (3 sample) — tek örnek gürültüsünü kes, zirveyi koru
+- **Güvenlik zamanlayıcı** — 1.5 saniyeden uzun süren sahte zirve fazını sıfırla
 - **Geofence sınır kontrolü** — PDR konumu bina dışına çıkamaz
 
-Her adımda konum, pusula yönünde `pdrStepLength` (0.65m) kadar ilerletilir ve accuracy `pdrAccuracyDecay` (0.5m) kadar artar.
+**Dinamik adım uzunluğu (Weinberg modeli):** `pdrDynamicStepLength` aktifken her adımın uzunluğu ivme genliğinden kestirilir: `stepLength = K · ⁴√(a_max − a_min)`, `[pdrStepLengthMin, pdrStepLengthMax]` aralığında sınırlanır. Kapalıyken sabit `pdrStepLength` (0.65m) kullanılır. Her adımda accuracy `pdrAccuracyDecay` (0.5m) kadar artar.
+
+**PDR→GPS yumuşak yeniden giriş:** `pdrReentrySmoothing` aktifken, iç mekan sinyali geri geldiğinde konum sürüklenmiş PDR tahmininden gerçek GPS'e tek sıçramada değil, birkaç güncellemede (`pdrReentryBlend` oranıyla) yaklaşır; `pdrReentrySnapDistance` altına inince doğrudan oturur.
 
 ### Altitude ve Kat Tespiti
 
@@ -145,9 +144,11 @@ Her adımda konum, pusula yönünde `pdrStepLength` (0.65m) kadar ilerletilir ve
 
 `deviceorientation` / `deviceorientationabsolute` event'leri ile pusula yönü takip edilir.
 
-- Median smoothing ile jitter azaltma
+- Dairesel ortalama ile jitter azaltma (0°/360° sınırında doğru)
 - Gimbal lock koruması (beta > 70°) — telefon dik tutulduğunda yön titreşimini engeller
 - Minimum açı değişimi eşiği (`minAngleChange: 3°`)
+
+**Jiroskop/tamamlayıcı filtre:** `headingGyroFusion` aktifken, PDR sırasında (devicemotion açıkken) jiroskop (`rotationRate.alpha`) kısa vadeli dönüşü entegre eder, pusula uzun vadeli referans olarak `headingCompassCorrection` oranıyla yavaşça düzeltir. Manyetik bozulmaya karşı heading'i stabilize eder. **Güvenlik:** füzyon sonucu pusuladan `headingGyroMaxDivergence` (25°) fazla ayrılırsa otomatik pusulaya kilitlenir; jiroskop verisi yoksa/bayatsa saf pusula davranışına döner. Eksen/işaret farklı cihazlarda ters olabilir → `headingGyroSign` (+1/−1) ile ayarlanır.
 
 ## Konfigürasyon Referansı
 
@@ -189,8 +190,8 @@ Her adımda konum, pusula yönünde `pdrStepLength` (0.65m) kadar ilerletilir ve
 | Parametre | Varsayılan | Açıklama |
 |-----------|-----------|----------|
 | `enableDeadReckoning` | `false` | PDR aktif |
-| `pdrStepLength` | `0.65` | Adım uzunluğu (m) |
-| `pdrStepThreshold` | `1.0` | High-pass ivme zirve eşiği (adaptive baz değer) |
+| `pdrStepLength` | `0.65` | Sabit adım uzunluğu (m) — dinamik kapalıyken kullanılır |
+| `pdrStepThreshold` | `0.8` | High-pass ivme zirve eşiği (adaptive baz değer) |
 | `pdrStepCooldown` | `300` | Adımlar arası min süre (ms) |
 | `pdrMinPeakValue` | `0.7` | Minimum zirve büyüklüğü |
 | `pdrAdaptiveThreshold` | `true` | Dinamik eşik |
@@ -198,6 +199,26 @@ Her adımda konum, pusula yönünde `pdrStepLength` (0.65m) kadar ilerletilir ve
 | `pdrMaxSteps` | `100` | Maks adım sayısı |
 | `pdrAccuracyDecay` | `0.5` | Adım başına accuracy artışı (m) |
 | `pdrInitialAccuracy` | `5` | Başlangıç accuracy (m) |
+| `pdrDynamicStepLength` | `true` | Dinamik adım uzunluğu (Weinberg) |
+| `pdrStepLengthFactor` | `0.5` | Weinberg K katsayısı |
+| `pdrStepLengthMin` | `0.4` | Dinamik adım uzunluğu alt sınırı (m) |
+| `pdrStepLengthMax` | `0.9` | Dinamik adım uzunluğu üst sınırı (m) |
+| `pdrReentrySmoothing` | `true` | PDR→GPS yumuşak yeniden giriş |
+| `pdrReentryBlend` | `0.5` | Yeniden girişte hedefe yaklaşma oranı (0-1) |
+| `pdrReentrySnapDistance` | `2` | Bu mesafe altına inince doğrudan otur (m) |
+
+### Yön / Heading
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `minAngleChange` | `3` | Minimum açı değişimi eşiği (derece) |
+| `orientationSmoothing` | `5` | Yön yumuşatma örnek sayısı |
+| `orientationUpdateInterval` | `100` | Yön kaynaklı marker güncelleme aralığı (ms) |
+| `gimbalLockThreshold` | `70` | Gimbal lock koruması beta eşiği (derece) |
+| `headingGyroFusion` | `true` | Jiroskop/tamamlayıcı filtre füzyonu |
+| `headingGyroSign` | `-1` | `rotationRate.alpha` → heading işaret düzeltmesi (+1/−1) |
+| `headingCompassCorrection` | `0.1` | Pusulaya çekme oranı (0-1) |
+| `headingGyroMaxDivergence` | `25` | Pusuladan bu açıyı aşınca kilitlen (derece, güvenlik) |
 
 ### Altitude ve Kat
 

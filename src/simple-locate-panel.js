@@ -206,6 +206,7 @@
         this._lastRaw = null;
         this._lastPosKey = null;
         this._lastAngle = null;
+        this._jumpActive = false; // isJump bayrağı yeni ham fix gelene kadar yapışık kalır; sadece yükselen kenarda logla
     }
 
     LocateLogger.prototype._posKey = function (payload) {
@@ -445,9 +446,14 @@
         this._prevCoreStats = this._snapshotCoreStats();
 
         if (payload.isJump) {
-            this.stats.jumps++;
-            this.log('filter', 'warn', 'Ani sıçrama (jump) tespit edildi ve filtrelendi',
-                { lat: payload.lat, lng: payload.lng });
+            if (!this._jumpActive) {
+                this._jumpActive = true;
+                this.stats.jumps++;
+                this.log('filter', 'warn', 'Ani sıçrama (jump) tespit edildi ve filtrelendi',
+                    { lat: payload.lat, lng: payload.lng });
+            }
+        } else {
+            this._jumpActive = false;
         }
 
         var mode = this._resolveDisplayMode(payload);
