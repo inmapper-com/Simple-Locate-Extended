@@ -132,6 +132,14 @@ Ek korumalar:
 
 **PDR→GPS yumuşak yeniden giriş:** `pdrReentrySmoothing` aktifken, iç mekan sinyali geri geldiğinde konum sürüklenmiş PDR tahmininden gerçek GPS'e tek sıçramada değil, birkaç güncellemede (`pdrReentryBlend` oranıyla) yaklaşır; `pdrReentrySnapDistance` altına inince doğrudan oturur.
 
+**ZUPT — duruş tespiti (B1):** `pdrZupt` aktifken, son `pdrZuptWindow` örneğinin varyansı `pdrZuptVariance` altına düşerse cihaz hareketsiz kabul edilir ve adım algılama bastırılır. Ayakta beklerken el titremesinden doğan "hayalet adım/sürüklenme"yi önler.
+
+**Otomatik adım uzunluğu kalibrasyonu (A2):** `pdrAutoCalibrate` aktifken, her PDR oturumu sinyal geri gelerek bittiğinde baş↔son GPS düz mesafesi PDR yol uzunluğuyla kıyaslanır. Düz yürüyüşte (`pdrCalibrateMaxHeadingVar` altında dönüş, en az `pdrCalibrateMinSteps` adım) `pdrStepLengthFactor` (Weinberg K) kişiye/cihaza göre öğrenilir; `[pdrStepLengthFactorMin, pdrStepLengthFactorMax]` arasında sınırlı ve `pdrCalibrateBlend` oranıyla yumuşak güncellenir.
+
+### Deneysel: Güven Ağırlıklı Füzyon (varsayılan kapalı)
+
+`experimentalFusion` tek anahtarı **sabit-hız (constant-velocity) Kalman modelini** açar: konum + hızı birlikte takip eder, tahmini `x += v·dt` ile yürütür ve yürürken sabit-konum modelinin gecikmesini azaltır. Hız insan yürüyüşüne sınırlanır (fırlama önlenir) ve filtre ölçümden çok uzaklaşırsa ölçüme çekilir. Test amaçlı olduğundan varsayılan kapalıdır; çalışma zamanında `enableFeature('experimentalFusion', true/false)` ile açılıp kapatılabilir. Kapalıyken mevcut sabit-konum davranışı birebir korunur.
+
 ### Altitude ve Kat Tespiti
 
 - Ham GPS altitude değeri geoid ondülasyonu (`geoidUndulation`) ile MSL'ye normalize edilir
@@ -149,6 +157,10 @@ Ek korumalar:
 - Minimum açı değişimi eşiği (`minAngleChange: 3°`)
 
 **Jiroskop/tamamlayıcı filtre:** `headingGyroFusion` aktifken, PDR sırasında (devicemotion açıkken) jiroskop (`rotationRate.alpha`) kısa vadeli dönüşü entegre eder, pusula uzun vadeli referans olarak `headingCompassCorrection` oranıyla yavaşça düzeltir. Manyetik bozulmaya karşı heading'i stabilize eder. **Güvenlik:** füzyon sonucu pusuladan `headingGyroMaxDivergence` (25°) fazla ayrılırsa otomatik pusulaya kilitlenir; jiroskop verisi yoksa/bayatsa saf pusula davranışına döner. Eksen/işaret farklı cihazlarda ters olabilir → `headingGyroSign` (+1/−1) ile ayarlanır.
+
+**Otomatik jiroskop işaret tespiti (A1):** `headingGyroAutoSign` aktifken, pusula belirgin döndüğünde jiroskop entegralinin işareti pusulayla uyuşuyor mu diye oy toplar; tutarlı uyumsuzlukta `headingGyroSign`'ı otomatik ters çevirir. Cihazlar arası "ok ters dönüyor" sorununu elle ayar gerektirmeden çözer. GPS gerekmez.
+
+**GPS gidiş yönü (course) düzeltmesi (A3):** `headingUseGpsCourse` aktifken, dış mekanda yeterli hızda (`gpsCourseMinSpeed`) ve iyi doğrulukta (`gpsCourseMaxAccuracy`) hareket halindeyken heading, GPS gidiş yönüne `gpsCourseCorrection` oranıyla çekilir. Manyetik bozulmadan kaynaklı pusula hatasını düzeltir; pusula hiç yoksa hareket halinde oku doğru yöne çevirir.
 
 ## Konfigürasyon Referansı
 
@@ -206,6 +218,15 @@ Ek korumalar:
 | `pdrReentrySmoothing` | `true` | PDR→GPS yumuşak yeniden giriş |
 | `pdrReentryBlend` | `0.5` | Yeniden girişte hedefe yaklaşma oranı (0-1) |
 | `pdrReentrySnapDistance` | `2` | Bu mesafe altına inince doğrudan otur (m) |
+| `pdrZupt` | `true` | ZUPT — duruşta adım bastırma |
+| `pdrZuptVariance` | `0.04` | Duruş varyans eşiği ((m/s²)²) |
+| `pdrZuptWindow` | `16` | Duruş varyans penceresi (örnek) |
+| `pdrAutoCalibrate` | `true` | Otomatik adım uzunluğu (K) kalibrasyonu |
+| `pdrCalibrateMinSteps` | `8` | Kalibrasyon için min adım |
+| `pdrCalibrateMaxHeadingVar` | `25` | Düz yürüyüş şartı — maks yön varyansı (derece) |
+| `pdrCalibrateBlend` | `0.3` | Yeni K'ya yaklaşma oranı (0-1) |
+| `pdrStepLengthFactorMin` | `0.3` | K alt sınırı |
+| `pdrStepLengthFactorMax` | `0.8` | K üst sınırı |
 
 ### Yön / Heading
 
@@ -219,6 +240,18 @@ Ek korumalar:
 | `headingGyroSign` | `-1` | `rotationRate.alpha` → heading işaret düzeltmesi (+1/−1) |
 | `headingCompassCorrection` | `0.1` | Pusulaya çekme oranı (0-1) |
 | `headingGyroMaxDivergence` | `25` | Pusuladan bu açıyı aşınca kilitlen (derece, güvenlik) |
+| `headingGyroAutoSign` | `true` | Jiroskop işaretini otomatik tespit (A1) |
+| `headingUseGpsCourse` | `true` | GPS gidiş yönüyle heading düzeltme (A3) |
+| `gpsCourseMinSpeed` | `1.2` | GPS yönü için min hız (m/s) |
+| `gpsCourseMaxAccuracy` | `25` | GPS yönü için maks accuracy (m) |
+| `gpsCourseCorrection` | `0.2` | Heading'i GPS yönüne çekme oranı (0-1) |
+
+### Deneysel / Performans
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `experimentalFusion` | `false` | Sabit-hız Kalman + güven ağırlıklı füzyon (test toggle) |
+| `motionUpdateHz` | `0` | devicemotion işleme üst sınırı (Hz, 0=sınırsız; düşük güçte 30-40) |
 
 ### Altitude ve Kat
 

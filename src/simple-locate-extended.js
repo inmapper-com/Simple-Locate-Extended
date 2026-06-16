@@ -8,7 +8,7 @@
  * - Gelişmiş API
  * 
  * @requires leaflet-simple-locate.js
- * @version 1.2.0
+ * @version 1.4.0
  */
 (function () {
     'use strict';
@@ -50,7 +50,8 @@
                 circleWatcher: options.circleWatcher !== false,
                 deadReckoning: !!options.enableDeadReckoning,
                 fadeMarkerOnFallback: options.fadeMarkerOnFallback !== false,
-                controlPanel: !!options.controlPanel
+                controlPanel: !!options.controlPanel,
+                experimentalFusion: !!options.experimentalFusion
             };
 
             // Birleşik kontrol paneli (Ayarlar + Loglar drawer) ayarları
@@ -177,6 +178,15 @@
                     this.options.fadeMarkerOnFallback = enabled;
                     if (typeof this._applyMarkerFallbackStyle === 'function') {
                         this._applyMarkerFallbackStyle();
+                    }
+                    break;
+                case 'experimentalFusion':
+                    this.options.experimentalFusion = enabled;
+                    // Sabit-hız durumunu temizle ki temiz yeniden başlasın
+                    if (this._kalmanFilter) {
+                        this._kalmanFilter.v_lat = 0;
+                        this._kalmanFilter.v_lng = 0;
+                        this._kalmanFilter.cvTime = null;
                     }
                     break;
             }

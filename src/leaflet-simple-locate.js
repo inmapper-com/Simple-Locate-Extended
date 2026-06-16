@@ -1,5 +1,5 @@
 /*
- * Leaflet.SimpleLocate Extended v1.3.0 - 2026-06-15
+ * Leaflet.SimpleLocate Extended v1.4.0 - 2026-06-16
  *
  * Based on original work by mfhsieh (v1.0.5)
  * Extended with Wei Ye filtering, Geofence, Indoor optimizations,
@@ -199,6 +199,18 @@
             headingGyroSign: -1,            // rotationRate.alpha → heading işaret düzeltmesi (+1/-1)
             headingCompassCorrection: 0.1,  // Her pusula örneğinde pusulaya çekme oranı (0-1)
             headingGyroMaxDivergence: 25,   // Bu açıyı (derece) aşınca pusulaya kilitlen (güvenlik)
+            // ── A1: Otomatik jiroskop işaret tespiti ──
+            // Pusula belirgin döndüğünde jiroskop entegralinin işareti pusulayla uyuşuyor mu
+            // diye oy toplar; tutarlı uyumsuzlukta headingGyroSign'ı otomatik ters çevirir.
+            // Cihazlar arası "ok ters dönüyor" riskini ortadan kaldırır. GPS gerekmez.
+            headingGyroAutoSign: true,
+            // ── A3: GPS gidiş yönü (course) ile heading düzeltme ──
+            // Dış mekanda hareket halinde GPS yönü pusuladan güvenilirdir; manyetik
+            // bozulma kaynaklı heading hatasını düzeltir ve oku seyahat yönüne çeker.
+            headingUseGpsCourse: true,
+            gpsCourseMinSpeed: 1.2,         // m/s — altında GPS yönü güvenilmez (duruş/gürültü)
+            gpsCourseMaxAccuracy: 25,       // m — bundan kötü konumda GPS yönü kullanılmaz
+            gpsCourseCorrection: 0.2,       // Heading'i GPS yönüne çekme oranı (0-1)
             clickTimeoutDelay: 500,
 
             setViewAfterClick: true,
@@ -290,6 +302,32 @@
             pdrReentrySmoothing: true,      // Yumuşak yeniden giriş aktif
             pdrReentryBlend: 0.5,           // Her GPS güncellemesinde hedefe yaklaşma oranı (0-1)
             pdrReentrySnapDistance: 2,      // Bu mesafenin altına inince doğrudan otur (m)
+            // ── B1: ZUPT (duruş tespiti) ──
+            // Cihaz hareketsizken (sinyal varyansı düşük) adım algılamayı bastırır;
+            // ayakta beklerken titreşimden doğan "hayalet adım/sürüklenme"yi keser.
+            pdrZupt: true,
+            pdrZuptVariance: 0.04,          // (m/s²)² — bu varyansın altı = duruş
+            pdrZuptWindow: 16,              // Varyans penceresi (örnek sayısı)
+            // ── A2: Otomatik adım uzunluğu (K) kalibrasyonu ──
+            // Her PDR oturumu bitince (sinyal geri gelince) baş↔son GPS düz mesafesini
+            // PDR yol uzunluğuyla kıyaslar; düz yürüyüşte K katsayısını kişiye/cihaza
+            // göre öğrenir. Sınırlı ve yumuşak güncellenir (ani sapma yapmaz).
+            pdrAutoCalibrate: true,
+            pdrCalibrateMinSteps: 8,        // Kalibrasyon için min adım sayısı
+            pdrCalibrateMaxHeadingVar: 25,  // derece — fazla dönüş varsa örnek reddedilir (düz şart)
+            pdrCalibrateBlend: 0.3,         // Yeni K'ya yaklaşma oranı (0-1)
+            pdrStepLengthFactorMin: 0.3,    // K alt sınırı
+            pdrStepLengthFactorMax: 0.8,    // K üst sınırı
+            // ── C2: Deneysel füzyon (test için TEK toggle, varsayılan KAPALI) ──
+            // Açıkken: (a) sabit-hız Kalman modeli (yürürken gecikmeyi azaltır),
+            //          (b) GPS/PDR sınırında güven ağırlıklı yumuşak harman.
+            // Riskli olduğundan opt-in; kapalıyken mevcut davranış birebir korunur.
+            experimentalFusion: false,
+            // ── Performans ──
+            // devicemotion işleme üst sınırı (Hz). 0 = sınırsız (mevcut davranış).
+            // Düşük güçlü cihazlarda 30-40 önerilir; adım sinyali ~2 Hz olduğundan
+            // 30+ Hz tespiti etkilemez ama CPU/pil yükünü düşürür.
+            motionUpdateHz: 0,
             
             // ========== ALTITUDE NORMALİZASYON & KAT TESPİTİ ==========
             enableAltitude: false,          // Altitude işleme aktif (varsayılan kapalı)
@@ -436,6 +474,16 @@
             // Jiroskop/tamamlayıcı filtre durumu
             this._fusedHeading = null;        // Füzyonlanmış heading (jiroskop + pusula)
             this._lastGyroTime = 0;           // Son jiroskop örneği zamanı (tazelik kontrolü)
+            // A1: jiroskop işaret oylaması (pusula↔jiro dönüş uyumu)
+            this._gyroAccumSinceCompass = 0;  // son pusula örneğinden beri ham jiro entegrali (°)
+            this._lastCompassForSign = null;  // işaret oylaması için son pusula açısı
+            this._gyroSignDisagree = 0;       // ardışık uyumsuz oy sayacı
+            // A3: GPS gidiş yönü (course) durumu
+            this._gpsHeading = null;          // güvenilir son GPS yönü (°)
+            this._gpsHeadingTime = 0;         // GPS yönü zaman damgası
+            this._gpsSpeed = null;            // son GPS hızı (m/s)
+            // Perf: devicemotion throttle son işlem zamanı
+            this._lastMotionProcess = 0;
 
             this._lowPassFilterLat = null;
             this._lowPassFilterLng = null;
@@ -462,7 +510,10 @@
                 x_lat: null, // Durum tahmini (enlem)
                 x_lng: null, // Durum tahmini (boylam)
                 P_lat: null, // Tahmin hatası kovaryansı (enlem)
-                P_lng: null  // Tahmin hatası kovaryansı (boylam)
+                P_lng: null, // Tahmin hatası kovaryansı (boylam)
+                // C2 (deneysel) sabit-hız modeli durumu
+                v_lat: 0, v_lng: 0,    // hız (derece/sn)
+                cvTime: null           // son ölçüm zamanı (dt için)
             };
 
             // Wei Ye algoritması durumunu takip etmek için özellikler
@@ -569,6 +620,12 @@
                 armTime: 0,
                 recentPeaks: [],
                 dynamicThreshold: 0,
+                // ── B1: ZUPT (duruş) ──
+                zuptBuf: [],            // varyans penceresi
+                stationary: false,      // şu an duruş halinde mi
+                // ── A2: kalibrasyon ──
+                pathLength: 0,          // bu oturumda kat edilen tahmini yol (m)
+                headingSamples: [],     // adım yönleri (düz yürüyüş varyansı için)
                 // ── Teşhis ──
                 dbgSamples: 0,
                 dbgMaxLinear: 0,
@@ -1070,6 +1127,8 @@
             
             // ═══ İÇ MEKAN SİNYALİ GERİ GELDİ → PDR DURDUR ═══
             if (this._pdr.active) {
+                // A2: durmadan önce adım uzunluğu katsayısını kalibre et (yeni GPS hedefiyle)
+                this._calibrateStepLength(position.latitude, position.longitude, position.accuracy);
                 // İç mekan sinyali geri geldi → PDR durduruluyor
                 // Yumuşak yeniden giriş: gösterilen PDR konumunu çıpa olarak sakla;
                 // gerçek GPS'e birkaç güncellemede yaklaşılacak (tek sıçrama yerine).
@@ -1543,6 +1602,9 @@
             this._kalmanFilter.x_lng = null;
             this._kalmanFilter.P_lat = null;
             this._kalmanFilter.P_lng = null;
+            this._kalmanFilter.v_lat = 0;
+            this._kalmanFilter.v_lng = 0;
+            this._kalmanFilter.cvTime = null;
 
             // Wei Ye durumunu sıfırla
             this._weiYeState.lastFilteredPosition = null;
@@ -1782,9 +1844,18 @@
             this._inGimbalLockZone = false;
             this._fusedHeading = null;
             this._lastGyroTime = 0;
+            this._gyroAccumSinceCompass = 0;
+            this._lastCompassForSign = null;
+            this._gyroSignDisagree = 0;
         },
 
         _onLocationFound: function (event) {
+            // GPS gidiş yönü (course) ve hızını yakala (A1/A3 için).
+            // Leaflet locationfound olayı tüm sayısal coords alanlarını taşır:
+            // event.heading (°, kuzeyden saat yönü) ve event.speed (m/s). Yön yalnızca
+            // yeterli hızda ve iyi doğrulukta güvenilirdir (duruşta NaN/eski değer gelir).
+            this._captureGpsCourse(event);
+
             // Wei Ye algoritması ile konumu filtrele
             const filteredPosition = this._applyWeiYeFilter(event);
             
@@ -1882,6 +1953,9 @@
                 return;
             }
             this._isFallbackLocation = false;
+
+            // A3: dış mekanda hareket halinde GPS yönüyle heading'i düzelt
+            this._applyGpsCourseToHeading();
 
             // PDR→GPS yumuşak yeniden giriş: hedef GPS konumuna kademeli yaklaş
             var targetLat = filteredPosition.latitude;
@@ -2099,6 +2173,28 @@
             var gyroFresh = this.options.headingGyroFusion &&
                 this._lastGyroTime && (now - this._lastGyroTime) < 500;
 
+            // A1: jiroskop işaret oylaması — pusula belirgin döndüyse, son pusula
+            // örneğinden beri biriken HAM jiro entegralinin işareti pusula yönüyle
+            // uyuşuyor mu? Tutarlı uyumsuzlukta headingGyroSign otomatik ters çevrilir.
+            if (gyroFresh && this.options.headingGyroAutoSign && this._lastCompassForSign !== null) {
+                var cDelta = this._angleDelta(compassHeading, this._lastCompassForSign);
+                if (Math.abs(cDelta) > 8 && Math.abs(this._gyroAccumSinceCompass) > 4) {
+                    var sign = this.options.headingGyroSign || -1;
+                    var agree = (sign * this._gyroAccumSinceCompass) * cDelta > 0;
+                    if (agree) {
+                        this._gyroSignDisagree = 0;
+                    } else if (++this._gyroSignDisagree >= 4) {
+                        this.options.headingGyroSign = -sign; // işareti düzelt
+                        this._gyroSignDisagree = 0;
+                    }
+                    this._lastCompassForSign = compassHeading;
+                    this._gyroAccumSinceCompass = 0;
+                }
+            } else if (gyroFresh && this.options.headingGyroAutoSign) {
+                this._lastCompassForSign = compassHeading;
+                this._gyroAccumSinceCompass = 0;
+            }
+
             if (!gyroFresh || this._fusedHeading === null) {
                 this._fusedHeading = compassHeading;
                 return compassHeading;
@@ -2115,6 +2211,46 @@
             var gain = this.options.headingCompassCorrection || 0.1;
             this._fusedHeading = (this._fusedHeading - gain * div + 360) % 360;
             return this._fusedHeading;
+        },
+
+        // GPS gidiş yönü (course) ve hızını yakala. Yalnızca yeterli hız + iyi doğrulukta
+        // güvenilir kabul edilir; aksi halde eski değer korunur (bayatlama _gpsHeadingTime ile).
+        _captureGpsCourse: function (event) {
+            if (!event) return;
+            if (event.speed !== null && event.speed !== undefined && isFinite(event.speed)) {
+                this._gpsSpeed = event.speed;
+            }
+            var h = event.heading;
+            if (h === null || h === undefined || !isFinite(h)) return;
+            var acc = event.accuracy;
+            if (this._gpsSpeed !== null && this._gpsSpeed >= this.options.gpsCourseMinSpeed &&
+                (acc === undefined || acc === null || acc <= this.options.gpsCourseMaxAccuracy)) {
+                this._gpsHeading = (h + 360) % 360;
+                this._gpsHeadingTime = Date.now();
+            }
+        },
+
+        // A3: dış mekanda güvenilir GPS yönü varsa heading'i ona doğru çek.
+        // Pusula yoksa doğrudan GPS yönünü kullanır (hareket halinde ok yine doğru gösterir).
+        _applyGpsCourseToHeading: function () {
+            if (!this.options.headingUseGpsCourse) return;
+            if (this._gpsHeading === null) return;
+            if (Date.now() - this._gpsHeadingTime > 3000) return; // bayat
+
+            if (this._angle === undefined || this._angle === null) {
+                this._angle = this._gpsHeading;
+                this._fusedHeading = this._gpsHeading;
+            } else {
+                var d = this._angleDelta(this._gpsHeading, this._angle); // gps - current
+                var gain = this.options.gpsCourseCorrection || 0.2;
+                this._angle = (this._angle + gain * d + 360) % 360;
+                // Füzyon referansını da kaydır ki jiroskop GPS'e karşı çekişmesin
+                if (this._fusedHeading !== null) {
+                    this._fusedHeading = (this._fusedHeading + gain * d + 360) % 360;
+                }
+            }
+            document.documentElement.style.setProperty(
+                "--leaflet-simple-locate-orientation", -this._angle + "deg");
         },
 
         // ════════════════════════════════════════════════════════
@@ -2435,6 +2571,10 @@
             this._pdr.armTime = 0;
             this._pdr.recentPeaks = [];
             this._pdr.dynamicThreshold = this.options.pdrStepThreshold;
+            this._pdr.zuptBuf = [];
+            this._pdr.stationary = false;
+            this._pdr.pathLength = 0;
+            this._pdr.headingSamples = [];
             this._pdr.dbgSamples = 0;
             this._pdr.dbgMaxLinear = 0;
             this._pdr.dbgLastEmit = Date.now();
@@ -2480,6 +2620,9 @@
             // Jiroskop füzyonunu sıfırla → heading saf pusulaya döner
             this._lastGyroTime = 0;
             this._fusedHeading = null;
+            this._gyroAccumSinceCompass = 0;
+            this._lastCompassForSign = null;
+            this._gyroSignDisagree = 0;
 
             this._pdr.active = false;
         },
@@ -2520,18 +2663,31 @@
                 return;
             }
 
+            // ── Perf: devicemotion throttle ──
+            // motionUpdateHz > 0 ise örnekleri hedef Hz'e seyrelt. dt tabanlı entegrasyon
+            // korunduğundan adım/heading doğruluğu etkilenmez (adım sinyali ~2 Hz).
+            if (this.options.motionUpdateHz > 0) {
+                var minGap = 1000 / this.options.motionUpdateHz;
+                if (this._lastMotionProcess && (now - this._lastMotionProcess) < minGap) return;
+                this._lastMotionProcess = now;
+            }
+
             // ── Jiroskop entegrasyonu (tamamlayıcı filtre) ──
             // rotationRate.alpha (z ekseni, deg/s) ile heading'i kısa vadede entegre et.
             // Pusula düzeltmesi _fuseHeading içinde (her pusula örneğinde) uygulanır.
             if (this.options.headingGyroFusion && event.rotationRate &&
                 event.rotationRate.alpha !== null && event.rotationRate.alpha !== undefined) {
                 var dtG = this._lastGyroTime ? (now - this._lastGyroTime) / 1000 : 0;
-                if (dtG > 0 && dtG < 0.5 && this._fusedHeading !== null) {
-                    var gsign = this.options.headingGyroSign || -1;
-                    this._fusedHeading = (this._fusedHeading + gsign * event.rotationRate.alpha * dtG + 360) % 360;
-                    this._angle = this._fusedHeading;
-                    document.documentElement.style.setProperty(
-                        "--leaflet-simple-locate-orientation", -this._angle + "deg");
+                if (dtG > 0 && dtG < 0.5) {
+                    // A1: ham entegrali işaret oylaması için biriktir (işaretten bağımsız)
+                    this._gyroAccumSinceCompass += event.rotationRate.alpha * dtG;
+                    if (this._fusedHeading !== null) {
+                        var gsign = this.options.headingGyroSign || -1;
+                        this._fusedHeading = (this._fusedHeading + gsign * event.rotationRate.alpha * dtG + 360) % 360;
+                        this._angle = this._fusedHeading;
+                        document.documentElement.style.setProperty(
+                            "--leaflet-simple-locate-orientation", -this._angle + "deg");
+                    }
                 }
                 this._lastGyroTime = now;
             }
@@ -2566,9 +2722,35 @@
             var thHigh = this._pdr.dynamicThreshold || this.options.pdrStepThreshold;
             var thLow = thHigh * 0.5;
 
+            // ── B1: ZUPT (duruş tespiti) ──
+            // Son N örneğin varyansı düşükse cihaz hareketsizdir; el titremesi/gürültü
+            // adıma dönüşmesin diye zirve algılamayı bastır ve mevcut zirveyi iptal et.
+            if (this.options.pdrZupt) {
+                this._pdr.zuptBuf.push(sig);
+                if (this._pdr.zuptBuf.length > this.options.pdrZuptWindow) this._pdr.zuptBuf.shift();
+                if (this._pdr.zuptBuf.length >= this.options.pdrZuptWindow) {
+                    var zMean = 0, zb = this._pdr.zuptBuf, zn = zb.length;
+                    for (var zi = 0; zi < zn; zi++) zMean += zb[zi];
+                    zMean /= zn;
+                    var zVar = 0;
+                    for (var zj = 0; zj < zn; zj++) { var zd = zb[zj] - zMean; zVar += zd * zd; }
+                    zVar /= zn;
+                    this._pdr.stationary = zVar < this.options.pdrZuptVariance;
+                } else {
+                    this._pdr.stationary = false;
+                }
+                if (this._pdr.stationary) {
+                    this._pdr.armed = false;
+                    this._pdr.peakValue = 0;
+                    this._pdr.valleyValue = 0;
+                }
+            }
+
             // ── Histerezisli zirve algılama ──
             // sig eşiği yukarı geçince "armed"; tekrar alt banda düşünce 1 adım tamamlanır.
-            if (!this._pdr.armed) {
+            if (this._pdr.stationary) {
+                // duruşta adım sayma — sadece teşhis akışı aşağıda devam eder
+            } else if (!this._pdr.armed) {
                 if (s > thHigh) {
                     this._pdr.armed = true;
                     this._pdr.peakValue = s;
@@ -2674,11 +2856,51 @@
             this._pdr.currentLatitude = newLat;
             this._pdr.currentLongitude = newLng;
             this._pdr.currentAccuracy += this.options.pdrAccuracyDecay;
+            // A2: kalibrasyon için yol uzunluğu ve adım yönlerini biriktir
+            this._pdr.pathLength += stepLength;
+            this._pdr.headingSamples.push(heading);
             this._latitude = newLat;
             this._longitude = newLng;
             this._accuracy = this._pdr.currentAccuracy;
             this._updateMarker();
             return 'ok';
+        },
+
+        // A2: PDR oturumu sinyal geri gelerek bittiğinde adım uzunluğu katsayısını (K)
+        // öğren. Düz yürüyüşte (heading varyansı düşük) baş↔son GPS düz mesafesi ≈ kat
+        // edilen yol olmalı; oran K'yı bu cihaz/kişi için kalibre eder. Sınırlı + yumuşak.
+        _calibrateStepLength: function (endLat, endLng, endAccuracy) {
+            if (!this.options.pdrAutoCalibrate || !this.options.pdrDynamicStepLength) return;
+            var steps = this._pdr.stepCount;
+            var pathLen = this._pdr.pathLength;
+            if (steps < this.options.pdrCalibrateMinSteps || pathLen <= 0) return;
+            if (endAccuracy !== undefined && endAccuracy !== null &&
+                endAccuracy > this.options.gpsCourseMaxAccuracy) return;
+            if (this._pdr.baseLatitude == null || this._pdr.baseLongitude == null) return;
+
+            // Düz yürüyüş şartı: adım yönlerinin dairesel yayılımı düşük olmalı
+            var hs = this._pdr.headingSamples;
+            if (hs.length >= 3) {
+                var sinS = 0, cosS = 0, d2r = Math.PI / 180;
+                for (var i = 0; i < hs.length; i++) { sinS += Math.sin(hs[i] * d2r); cosS += Math.cos(hs[i] * d2r); }
+                var R = Math.sqrt(sinS * sinS + cosS * cosS) / hs.length; // 1=düz, 0=dağınık
+                var circStdDeg = Math.sqrt(-2 * Math.log(Math.max(R, 1e-6))) * (180 / Math.PI);
+                if (circStdDeg > this.options.pdrCalibrateMaxHeadingVar) return;
+            }
+
+            var straight = L.latLng(this._pdr.baseLatitude, this._pdr.baseLongitude)
+                .distanceTo(L.latLng(endLat, endLng));
+            if (straight < 1) return; // anlamsız küçük
+
+            var ratio = straight / pathLen;
+            if (ratio < 0.5 || ratio > 1.6) return; // aşırı sapma = güvenilmez örnek
+
+            var newK = this.options.pdrStepLengthFactor * ratio;
+            newK = Math.min(this.options.pdrStepLengthFactorMax,
+                Math.max(this.options.pdrStepLengthFactorMin, newK));
+            var blend = this.options.pdrCalibrateBlend;
+            this.options.pdrStepLengthFactor =
+                this.options.pdrStepLengthFactor * (1 - blend) + newK * blend;
         },
         
         // PDR aktif mi? (dışarıdan sorgulanabilir)
@@ -3003,6 +3225,13 @@
                 }
             }
 
+            // ── C2 (deneysel): sabit-hız (constant-velocity) Kalman ──
+            // Konum + hız takip eder; tahmini x += v·dt ile yürütür. Yürürken sabit-konum
+            // modelinin gecikmesini belirgin azaltır. Yalnızca experimentalFusion açıkken.
+            if (this.options.experimentalFusion) {
+                return this._applyKalmanCV(position);
+            }
+
             // Kalman filtresi adımları
             // 1. Tahmin (Prediction)
             // Durum tahmini aynı kalır (durağan model varsayımı)
@@ -3046,6 +3275,75 @@
                 kf.x_lng = blendFactor * position.longitude + (1 - blendFactor) * kf.x_lng;
             }
 
+            return {
+                latitude: kf.x_lat,
+                longitude: kf.x_lng,
+                accuracy: position.accuracy,
+                timestamp: position.timestamp
+            };
+        },
+
+        // C2 (deneysel): sabit-hız (alpha-beta) Kalman.
+        // Konum ve hızı birlikte takip eder; tahmin x += v·dt ile yürür, ölçüm artığıyla
+        // hem konum hem hız düzeltilir. Yürürken gecikmeyi azaltır. Güven (accuracy) düştükçe
+        // ölçüme daha az güvenir. Hız insan yürüyüşüne sınırlanır (overshoot/fırlamayı önler).
+        _applyKalmanCV: function (position) {
+            const kf = this._kalmanFilter;
+            const now = position.timestamp || Date.now();
+            const dt = kf.cvTime ? (now - kf.cvTime) / 1000 : 0;
+
+            // İlk örnek veya geçersiz dt → yeniden başlat
+            if (kf.x_lat === null || kf.x_lng === null || dt <= 0.05 || dt > 5) {
+                kf.x_lat = position.latitude;
+                kf.x_lng = position.longitude;
+                kf.v_lat = 0;
+                kf.v_lng = 0;
+                kf.cvTime = now;
+                return {
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    accuracy: position.accuracy,
+                    timestamp: position.timestamp
+                };
+            }
+
+            // Ölçüm güvenine göre konum kazancı (accuracy iyi → büyük alpha)
+            var acc = position.accuracy || 20;
+            var alpha = Math.min(0.8, Math.max(0.2, 0.8 - acc / 80));
+            var beta = (alpha * alpha) / (2 - alpha); // alpha-beta kararlı ilişki
+
+            // Tahmin
+            var predLat = kf.x_lat + kf.v_lat * dt;
+            var predLng = kf.x_lng + kf.v_lng * dt;
+
+            // Artık (residual)
+            var rLat = position.latitude - predLat;
+            var rLng = position.longitude - predLng;
+
+            // Güncelleme
+            kf.x_lat = predLat + alpha * rLat;
+            kf.x_lng = predLng + alpha * rLng;
+            kf.v_lat = kf.v_lat + (beta / dt) * rLat;
+            kf.v_lng = kf.v_lng + (beta / dt) * rLng;
+
+            // Hızı insan yürüyüşüne sınırla (derece/sn) → fırlamayı önle
+            var maxSpeed = (this.options.indoorMode ? this.options.maxIndoorSpeed : this.options.maxHumanSpeed) || 3;
+            var maxVLat = maxSpeed / 111320;
+            var cosL = Math.cos(kf.x_lat * Math.PI / 180) || 1;
+            var maxVLng = maxSpeed / (111320 * Math.abs(cosL || 1));
+            if (kf.v_lat > maxVLat) kf.v_lat = maxVLat; else if (kf.v_lat < -maxVLat) kf.v_lat = -maxVLat;
+            if (kf.v_lng > maxVLng) kf.v_lng = maxVLng; else if (kf.v_lng < -maxVLng) kf.v_lng = -maxVLng;
+
+            // Güvenlik: filtre ölçümden çok uzaklaştıysa ölçüme çek (sabit-konumdaki ile aynı mantık)
+            var filteredDistance = L.latLng(position.latitude, position.longitude)
+                .distanceTo(L.latLng(kf.x_lat, kf.x_lng));
+            var maxAllowed = Math.max(position.accuracy * 2, 20);
+            if (filteredDistance > maxAllowed) {
+                kf.x_lat = 0.6 * position.latitude + 0.4 * kf.x_lat;
+                kf.x_lng = 0.6 * position.longitude + 0.4 * kf.x_lng;
+            }
+
+            kf.cvTime = now;
             return {
                 latitude: kf.x_lat,
                 longitude: kf.x_lng,
