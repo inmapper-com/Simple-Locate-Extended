@@ -1042,8 +1042,7 @@
         });
         var expHint = document.createElement('div');
         expHint.className = 'slp-hint';
-        expHint.innerHTML = 'Yürürken GPS takip gecikmesini azaltmayı dener. İç mekanda beklenmedik sıçrama yapabilir — ' +
-            'önce dışarıda A/B test edin. Kapalıyken mevcut filtre davranışı korunur.';
+        expHint.innerHTML = 'Yürürken GPS takip gecikmesini azaltmayı dener.';
         exp.appendChild(expHint);
 
         // --- Geofence (görünürlük + interaktif çizim) ---
