@@ -1028,6 +1028,24 @@
             self._setFeature('fadeMarkerOnFallback', v, function () { ctrl.options.fadeMarkerOnFallback = v; });
         });
 
+        // --- Deneysel (test) ---
+        var exp = this._section(pane, 'Sabit-Hız Kalman Füzyonu (Deneysel)');
+        this._toggle(exp, 'Sabit-Hız Kalman Füzyonu', !!o.experimentalFusion, function (v) {
+            self._setFeature('experimentalFusion', v, function () {
+                ctrl.options.experimentalFusion = v;
+                if (ctrl._kalmanFilter) {
+                    ctrl._kalmanFilter.v_lat = 0;
+                    ctrl._kalmanFilter.v_lng = 0;
+                    ctrl._kalmanFilter.cvTime = null;
+                }
+            });
+        });
+        var expHint = document.createElement('div');
+        expHint.className = 'slp-hint';
+        expHint.innerHTML = 'Yürürken GPS takip gecikmesini azaltmayı dener. İç mekanda beklenmedik sıçrama yapabilir — ' +
+            'önce dışarıda A/B test edin. Kapalıyken mevcut filtre davranışı korunur.';
+        exp.appendChild(expHint);
+
         // --- Geofence (görünürlük + interaktif çizim) ---
         if (typeof ctrl.toggleGeofence === 'function') {
             this._buildGeofenceSection(pane);
