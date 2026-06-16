@@ -1029,7 +1029,7 @@
         });
 
         // --- Deneysel (test) ---
-        var exp = this._section(pane, 'Sabit-Hız Kalman Füzyonu (Deneysel)');
+        var exp = this._section(pane, 'Sabit-Hız Kalman Füzyonu');
         this._toggle(exp, 'Sabit-Hız Kalman Füzyonu', !!o.experimentalFusion, function (v) {
             self._setFeature('experimentalFusion', v, function () {
                 ctrl.options.experimentalFusion = v;
