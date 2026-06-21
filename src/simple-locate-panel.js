@@ -191,6 +191,44 @@
         if (floor != null) return 'Kat ' + floor;
         return null;
     }
+    function downloadBlob(content, filename, mime) {
+        try {
+            var blob = new Blob([content], { type: mime || 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+    // Paylaşım dosyasını tıklama anında (senkron) seç — Android'de async retry user gesture kaybettirir
+    function pickShareFile(json, filename) {
+        if (typeof File !== 'function' || typeof Blob !== 'function') return null;
+        var isAndroid = /Android/i.test(navigator.userAgent);
+        var mimes = isAndroid
+            ? ['text/plain', 'application/json', 'application/octet-stream']
+            : ['application/json', 'text/plain', 'application/octet-stream'];
+        var fallback = null;
+        for (var i = 0; i < mimes.length; i++) {
+            try {
+                var mime = mimes[i];
+                var blob = new Blob([json], { type: mime });
+                var file = new File([blob], filename, { type: mime, lastModified: Date.now() });
+                if (!fallback) fallback = file;
+                if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+                    return file;
+                }
+            } catch (e) { /* sonraki MIME */ }
+        }
+        return fallback;
+    }
     function formatAltitudeParts(altitude, floorName, floor) {
         var parts = [];
         if (altitude != null && isFinite(altitude)) parts.push('yük ' + num(altitude, 1) + 'm');
@@ -1378,7 +1416,7 @@
     };
 
     // Logları paylaş — yerel paylaş menüsünde .json DOSYASI olarak açılır (metin değil).
-    // WebView'de navigator.share yoksa native bridge veya pano yedeği kullanılır.
+    // Android: tek senkron share çağrısı (async retry user gesture kaybettirir).
     SimpleLocatePanel.prototype._shareLogs = function (btn) {
         var self = this;
         var json = this.logger.exportJSON();
@@ -1396,41 +1434,42 @@
             return;
         }
 
-        if (!navigator.share || typeof File !== 'function') {
-            this._copyLogsToClipboard(json, function () {
-                feedback('✕ Paylaşım yok — panoya kopyalandı');
-            });
+        if (!navigator.share) {
+            if (downloadBlob(json, filename, 'application/json')) {
+                feedback('✓ Dosya indirildi');
+            } else {
+                this._copyLogsToClipboard(json, function () {
+                    feedback('✕ Paylaşım yok — panoya kopyalandı');
+                });
+            }
             return;
         }
 
-        // canShare bazı cihazlarda application/json için false döner ama share yine çalışır;
-        // bu yüzden doğrudan share dene, MIME türlerini sırayla dene, metin paylaşımına düşme.
-        var mimes = ['application/json', 'text/plain', 'application/octet-stream'];
-        var idx = 0;
-
-        function tryFileShare() {
-            if (idx >= mimes.length) {
-                self._copyLogsToClipboard(json, function () {
-                    feedback('✕ Dosya paylaşımı yok — panoya kopyalandı');
+        var file = pickShareFile(json, filename);
+        if (!file) {
+            if (downloadBlob(json, filename, 'application/json')) {
+                feedback('✓ Dosya indirildi');
+            } else {
+                this._copyLogsToClipboard(json, function () {
+                    feedback('✕ Paylaşım yok — panoya kopyalandı');
                 });
-                return;
             }
-            var mime = mimes[idx++];
-            var file;
-            try {
-                file = new File([json], filename, { type: mime, lastModified: Date.now() });
-            } catch (e) {
-                tryFileShare();
-                return;
-            }
-            navigator.share({ files: [file], title: 'Konum logları' })
-                .then(function () { feedback('✓ Paylaşıldı'); })
-                .catch(function (err) {
-                    if (err && err.name === 'AbortError') { restore(); return; }
-                    tryFileShare();
-                });
+            return;
         }
-        tryFileShare();
+
+        // Yalnızca files — title/text bazı Android sürümlerinde dosya paylaşımını bozar
+        navigator.share({ files: [file] })
+            .then(function () { feedback('✓ Paylaşıldı'); })
+            .catch(function (err) {
+                if (err && err.name === 'AbortError') { restore(); return; }
+                if (downloadBlob(json, filename, file.type || 'application/json')) {
+                    feedback('✓ İndirildi — Dosyalar\'dan paylaş');
+                    return;
+                }
+                self._copyLogsToClipboard(json, function () {
+                    feedback('✕ Paylaşım yok — panoya kopyalandı');
+                });
+            });
     };
 
     // Host uygulama (WebView) native paylaşım köprüsü sağlayabilir
