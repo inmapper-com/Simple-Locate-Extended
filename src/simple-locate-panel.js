@@ -118,7 +118,19 @@
         'flex-shrink:0;min-width:52px;}' +
         '.slp-float-alt-val{font-size:13px;font-weight:700;color:#e8dcc8;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;}' +
         '.slp-float-alt-floor{font-size:9px;font-weight:600;color:#b08d57;line-height:1.15;letter-spacing:.25px;' +
-        'text-transform:uppercase;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;}';
+        'text-transform:uppercase;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;}' +
+        '.slp-share-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;' +
+        'align-items:center;justify-content:center;padding:20px;font-family:system-ui,-apple-system,sans-serif;}' +
+        '.slp-share-card{background:#fff;border-radius:16px;padding:20px;max-width:340px;width:100%;' +
+        'box-shadow:0 8px 32px rgba(0,0,0,.25);}' +
+        '.slp-share-title{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;}' +
+        '.slp-share-sub{margin:0 0 16px;font-size:12px;color:#6b7280;word-break:break-all;}' +
+        '.slp-share-open{width:100%;padding:14px;border:none;border-radius:10px;background:#3b82f6;color:#fff;' +
+        'font-size:15px;font-weight:700;cursor:pointer;margin-bottom:8px;}' +
+        '.slp-share-ghost{width:100%;padding:10px;border:none;border-radius:8px;background:#f3f4f6;color:#374151;' +
+        'font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px;}' +
+        '.slp-share-cancel{width:100%;padding:8px;border:none;border-radius:8px;background:transparent;' +
+        'color:#9ca3af;font-size:12px;cursor:pointer;}';
 
         var style = document.createElement('style');
         style.id = STYLE_ID;
@@ -191,43 +203,31 @@
         if (floor != null) return 'Kat ' + floor;
         return null;
     }
-    function downloadBlob(content, filename, mime) {
-        try {
-            var blob = new Blob([content], { type: mime || 'application/json' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-            return true;
-        } catch (e) {
-            return false;
-        }
+    function isMobileDevice() {
+        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
     }
-    // Paylaşım dosyasını tıklama anında (senkron) seç — Android'de async retry user gesture kaybettirir
+    function buildShareFile(json, filename, mime) {
+        var blob = new Blob([json], { type: mime });
+        return new File([blob], filename, { type: mime, lastModified: Date.now() });
+    }
+    // Paylaşım dosyasını tıklama anında (senkron) seç
     function pickShareFile(json, filename) {
         if (typeof File !== 'function' || typeof Blob !== 'function') return null;
         var isAndroid = /Android/i.test(navigator.userAgent);
         var mimes = isAndroid
-            ? ['text/plain', 'application/json', 'application/octet-stream']
+            ? ['text/plain', 'application/octet-stream', 'application/json']
             : ['application/json', 'text/plain', 'application/octet-stream'];
-        var fallback = null;
+        var best = null;
         for (var i = 0; i < mimes.length; i++) {
             try {
-                var mime = mimes[i];
-                var blob = new Blob([json], { type: mime });
-                var file = new File([blob], filename, { type: mime, lastModified: Date.now() });
-                if (!fallback) fallback = file;
+                var file = buildShareFile(json, filename, mimes[i]);
+                if (!best) best = file;
                 if (!navigator.canShare || navigator.canShare({ files: [file] })) {
                     return file;
                 }
             } catch (e) { /* sonraki MIME */ }
         }
-        return fallback;
+        return best;
     }
     function formatAltitudeParts(altitude, floorName, floor) {
         var parts = [];
@@ -1415,61 +1415,144 @@
         }
     };
 
-    // Logları paylaş — yerel paylaş menüsünde .json DOSYASI olarak açılır (metin değil).
-    // Android: tek senkron share çağrısı (async retry user gesture kaybettirir).
+    // Logları paylaş — .json dosyası olarak sistem paylaş menüsü (indirme değil).
     SimpleLocatePanel.prototype._shareLogs = function (btn) {
-        var self = this;
         var json = this.logger.exportJSON();
         var filename = 'locate-log-' + Date.now() + '.json';
-        var orig = btn ? btn.textContent : '';
-        var feedback = function (txt) {
-            if (!btn) return;
-            btn.textContent = txt;
-            setTimeout(function () { btn.textContent = orig; }, 2200);
-        };
-        var restore = function () { if (btn) btn.textContent = orig; };
 
         if (this._tryNativeShare(json, filename)) {
-            feedback('✓ Paylaşılıyor…');
-            return;
-        }
-
-        if (!navigator.share) {
-            if (downloadBlob(json, filename, 'application/json')) {
-                feedback('✓ Dosya indirildi');
-            } else {
-                this._copyLogsToClipboard(json, function () {
-                    feedback('✕ Paylaşım yok — panoya kopyalandı');
-                });
+            if (btn) {
+                var orig0 = btn.textContent;
+                btn.textContent = '✓ Paylaşılıyor…';
+                setTimeout(function () { btn.textContent = orig0; }, 2200);
             }
             return;
         }
 
+        if (!navigator.share || typeof File !== 'function') {
+            this._copyLogsToClipboard(json, function () {
+                if (btn) {
+                    var o = btn.textContent;
+                    btn.textContent = '✕ Paylaşım yok — panoya kopyalandı';
+                    setTimeout(function () { btn.textContent = o; }, 2200);
+                }
+            });
+            return;
+        }
+
+        // Mobilde drawer içindeki tıklama Android'de user-gesture kaybettirebiliyor;
+        // paylaşımı ayrı tam ekran butonla tetikle (temiz gesture).
+        if (isMobileDevice()) {
+            this._showShareSheetModal(json, filename, btn);
+            return;
+        }
+
+        this._invokeFileShare(json, filename, btn, null);
+    };
+
+    // Sistem paylaş menüsünü aç — yalnızca dosya, indirme yok
+    SimpleLocatePanel.prototype._invokeFileShare = function (json, filename, btn, onClose) {
+        var self = this;
         var file = pickShareFile(json, filename);
         if (!file) {
-            if (downloadBlob(json, filename, 'application/json')) {
-                feedback('✓ Dosya indirildi');
-            } else {
-                this._copyLogsToClipboard(json, function () {
-                    feedback('✕ Paylaşım yok — panoya kopyalandı');
-                });
-            }
+            this._copyLogsToClipboard(json, function () {
+                if (btn) {
+                    var o = btn.textContent;
+                    btn.textContent = '✕ Dosya oluşturulamadı — panoya kopyalandı';
+                    setTimeout(function () { btn.textContent = o; }, 2200);
+                }
+            });
             return;
         }
 
-        // Yalnızca files — title/text bazı Android sürümlerinde dosya paylaşımını bozar
-        navigator.share({ files: [file] })
-            .then(function () { feedback('✓ Paylaşıldı'); })
+        var payload = { files: [file] };
+        if (/Android/i.test(navigator.userAgent)) {
+            payload.title = 'Konum logları';
+        }
+
+        navigator.share(payload)
+            .then(function () {
+                if (btn) {
+                    var o = btn.textContent;
+                    btn.textContent = '✓ Paylaşıldı';
+                    setTimeout(function () { btn.textContent = o; }, 2200);
+                }
+                if (onClose) onClose(true);
+            })
             .catch(function (err) {
-                if (err && err.name === 'AbortError') { restore(); return; }
-                if (downloadBlob(json, filename, file.type || 'application/json')) {
-                    feedback('✓ İndirildi — Dosyalar\'dan paylaş');
+                if (err && err.name === 'AbortError') {
+                    if (onClose) onClose(false);
                     return;
                 }
-                self._copyLogsToClipboard(json, function () {
-                    feedback('✕ Paylaşım yok — panoya kopyalandı');
-                });
+                if (btn) {
+                    var o2 = btn.textContent;
+                    btn.textContent = '✕ Paylaşım açılamadı';
+                    setTimeout(function () { btn.textContent = o2; }, 2200);
+                }
+                if (onClose) onClose(false);
             });
+    };
+
+    // Mobil paylaşım adımı — kullanıcı buradaki butona basınca menü açılır
+    SimpleLocatePanel.prototype._showShareSheetModal = function (json, filename, toolbarBtn) {
+        var self = this;
+        this._closeShareSheetModal();
+
+        var overlay = document.createElement('div');
+        overlay.className = 'slp-share-overlay';
+        overlay.id = 'slp-share-overlay';
+
+        var card = document.createElement('div');
+        card.className = 'slp-share-card';
+
+        var title = document.createElement('p');
+        title.className = 'slp-share-title';
+        title.textContent = 'Log dosyasını paylaş';
+
+        var sub = document.createElement('p');
+        sub.className = 'slp-share-sub';
+        sub.textContent = filename + ' · JSON dosyası olarak Slack, Drive vb. uygulamalara gönderilir.';
+
+        var openBtn = document.createElement('button');
+        openBtn.className = 'slp-share-open';
+        openBtn.textContent = '📤 Paylaş menüsünü aç';
+        openBtn.addEventListener('click', function () {
+            self._invokeFileShare(json, filename, toolbarBtn, function (ok) {
+                if (ok) self._closeShareSheetModal();
+            });
+        });
+
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'slp-share-ghost';
+        copyBtn.textContent = 'Panoya kopyala';
+        copyBtn.addEventListener('click', function () {
+            self._copyLogsToClipboard(json, function () {
+                copyBtn.textContent = '✓ Kopyalandı';
+                setTimeout(function () { copyBtn.textContent = 'Panoya kopyala'; }, 1500);
+            });
+        });
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'slp-share-cancel';
+        cancelBtn.textContent = 'İptal';
+        cancelBtn.addEventListener('click', function () { self._closeShareSheetModal(); });
+
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) self._closeShareSheetModal();
+        });
+
+        card.appendChild(title);
+        card.appendChild(sub);
+        card.appendChild(openBtn);
+        card.appendChild(copyBtn);
+        card.appendChild(cancelBtn);
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+    };
+
+    SimpleLocatePanel.prototype._closeShareSheetModal = function () {
+        var el = document.getElementById('slp-share-overlay');
+        if (el) el.remove();
     };
 
     // Host uygulama (WebView) native paylaşım köprüsü sağlayabilir
