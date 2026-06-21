@@ -1856,6 +1856,18 @@
             // yeterli hızda ve iyi doğrulukta güvenilirdir (duruşta NaN/eski değer gelir).
             this._captureGpsCourse(event);
 
+            // ========== ALTITUDE İŞLEME (konum/geofence durumundan BAĞIMSIZ) ==========
+            // Dikey yükseklik, yatay geofence konumundan bağımsızdır. Bu yüzden altitude'u
+            // filtreleme/geofence/red kontrollerinden ÖNCE işle: konum dışarıda, reddedilmiş
+            // ya da fallback olsa bile yükseklik/kat güncel kalsın.
+            if (this.options.enableAltitude && event.altitude !== undefined) {
+                try {
+                    this._processAltitude(event);
+                } catch (e) {
+                    // Altitude işleme hatası — konumu etkilemesin
+                }
+            }
+
             // Wei Ye algoritması ile konumu filtrele
             const filteredPosition = this._applyWeiYeFilter(event);
             
@@ -1902,6 +1914,12 @@
                         isFallback: false,
                         isIndoorMode: this.options.indoorMode,
                         consecutiveBadLocations: this._consecutiveBadLocations,
+                        altitude: this._altitude.filtered,
+                        altitudeRaw: this._altitude.raw,
+                        altitudeAccuracy: this._altitude.accuracy,
+                        altitudePlatform: this._altitude.platform,
+                        floor: this._altitude.floor,
+                        floorName: this._altitude.floorName,
                         updateKind: 'reject'
                     });
                 }
@@ -1989,18 +2007,8 @@
             this._latitude = targetLat;
             this._longitude = targetLng;
             this._accuracy = filteredPosition.accuracy;
-            
-            // ========== ALTITUDE İŞLEME ==========
-            // Leaflet locationfound event'inde altitude bilgisi varsa işle
-            if (this.options.enableAltitude && event.altitude !== undefined) {
-                try {
-                    this._processAltitude(event);
-                } catch (e) {
-                    // Altitude işleme hatası
-                }
-            }
 
-            // Marker'ı güncelle
+            // Marker'ı güncelle (altitude konumdan bağımsız olarak yukarıda işlendi)
             this._updateMarker();
         },
 

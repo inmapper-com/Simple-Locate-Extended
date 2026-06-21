@@ -1486,26 +1486,6 @@
             });
     };
 
-    // Dosyayı indir (tarayıcılarda en güvenilir; bazı WebView'lerde engelli olabilir).
-    SimpleLocatePanel.prototype._downloadJson = function (json, filename) {
-        try {
-            var blob = new Blob([json], { type: 'application/json' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            a.rel = 'noopener';
-            a.style.display = 'none';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
-            return true;
-        } catch (e) {
-            return false;
-        }
-    };
-
     // Paylaşım merkezi modalı — her platformda en az bir çalışan yol garanti eder.
     SimpleLocatePanel.prototype._showShareModal = function (json, filename) {
         var self = this;
@@ -1565,22 +1545,7 @@
         });
         card.appendChild(copyBtn);
 
-        // 3) İndir — tarayıcılarda dosya olarak kaydet
-        var dlBtn = document.createElement('button');
-        dlBtn.className = 'slp-share-ghost';
-        dlBtn.innerHTML = '⬇ Dosyayı indir';
-        dlBtn.addEventListener('click', function () {
-            var ok = self._downloadJson(json, filename);
-            dlBtn.classList.toggle('ok', ok);
-            dlBtn.innerHTML = ok ? '✓ İndirildi' : '✕ İndirme engelli';
-            setTimeout(function () {
-                dlBtn.classList.remove('ok');
-                dlBtn.innerHTML = '⬇ Dosyayı indir';
-            }, 1800);
-        });
-        card.appendChild(dlBtn);
-
-        // 4) Garanti yedek: paylaşım/indirme/pano hepsi engelliyse metni elle seç-kopyala
+        // 3) Garanti yedek: paylaşım/pano engelliyse metni elle seç-kopyala
         var divider = document.createElement('div');
         divider.className = 'slp-share-divider';
         divider.textContent = 'veya metni elle kopyala';
@@ -1596,7 +1561,7 @@
 
         var hint = document.createElement('p');
         hint.className = 'slp-share-hint';
-        hint.textContent = 'Paylaşım veya indirme çalışmazsa kutuya dokunup tümünü seçin, kopyalayıp Slack’e yapıştırın.';
+        hint.textContent = 'Paylaşım çalışmazsa kutuya dokunup tümünü seçin, kopyalayıp Slack’e yapıştırın.';
         card.appendChild(hint);
 
         var cancelBtn = document.createElement('button');
