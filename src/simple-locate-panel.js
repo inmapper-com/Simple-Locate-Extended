@@ -120,17 +120,30 @@
         '.slp-float-alt-floor{font-size:9px;font-weight:600;color:#b08d57;line-height:1.15;letter-spacing:.25px;' +
         'text-transform:uppercase;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;}' +
         '.slp-share-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999999;display:flex;' +
-        'align-items:center;justify-content:center;padding:20px;font-family:system-ui,-apple-system,sans-serif;}' +
-        '.slp-share-card{background:#fff;border-radius:16px;padding:20px;max-width:340px;width:100%;' +
-        'box-shadow:0 8px 32px rgba(0,0,0,.25);}' +
-        '.slp-share-title{margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;}' +
-        '.slp-share-sub{margin:0 0 16px;font-size:12px;color:#6b7280;word-break:break-all;}' +
+        'align-items:center;justify-content:center;padding:16px;font-family:system-ui,-apple-system,sans-serif;' +
+        '-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px);}' +
+        '.slp-share-card{background:#fff;border-radius:16px;padding:18px;max-width:360px;width:100%;' +
+        'max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.25);}' +
+        '.slp-share-title{margin:0 0 4px;font-size:16px;font-weight:700;color:#111827;}' +
+        '.slp-share-sub{margin:0 0 14px;font-size:12px;color:#6b7280;word-break:break-all;}' +
         '.slp-share-open{width:100%;padding:14px;border:none;border-radius:10px;background:#3b82f6;color:#fff;' +
-        'font-size:15px;font-weight:700;cursor:pointer;margin-bottom:8px;}' +
-        '.slp-share-ghost{width:100%;padding:10px;border:none;border-radius:8px;background:#f3f4f6;color:#374151;' +
-        'font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px;}' +
-        '.slp-share-cancel{width:100%;padding:8px;border:none;border-radius:8px;background:transparent;' +
-        'color:#9ca3af;font-size:12px;cursor:pointer;}';
+        'font-size:15px;font-weight:700;cursor:pointer;margin-bottom:8px;display:flex;align-items:center;' +
+        'justify-content:center;gap:6px;transition:background .15s;}' +
+        '.slp-share-open:active{background:#2563eb;}' +
+        '.slp-share-open.ok{background:#16a34a;}' +
+        '.slp-share-ghost{width:100%;padding:11px;border:1px solid #e5e7eb;border-radius:9px;background:#f9fafb;' +
+        'color:#374151;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:8px;display:flex;' +
+        'align-items:center;justify-content:center;gap:6px;}' +
+        '.slp-share-ghost:active{background:#f3f4f6;}' +
+        '.slp-share-ghost.ok{background:#dcfce7;border-color:#86efac;color:#15803d;}' +
+        '.slp-share-divider{display:flex;align-items:center;gap:8px;margin:12px 0 8px;color:#9ca3af;font-size:11px;}' +
+        '.slp-share-divider::before,.slp-share-divider::after{content:"";flex:1;height:1px;background:#e5e7eb;}' +
+        '.slp-share-text{width:100%;box-sizing:border-box;height:84px;resize:none;border:1px solid #e5e7eb;' +
+        'border-radius:8px;padding:8px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:10px;' +
+        'color:#374151;background:#f9fafb;line-height:1.4;margin-bottom:6px;-webkit-user-select:text;user-select:text;}' +
+        '.slp-share-hint{font-size:11px;color:#9ca3af;margin:0 0 12px;line-height:1.4;}' +
+        '.slp-share-cancel{width:100%;padding:9px;border:none;border-radius:8px;background:transparent;' +
+        'color:#9ca3af;font-size:13px;font-weight:600;cursor:pointer;}';
 
         var style = document.createElement('style');
         style.id = STYLE_ID;
@@ -203,14 +216,22 @@
         if (floor != null) return 'Kat ' + floor;
         return null;
     }
-    function isMobileDevice() {
-        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    }
     function buildShareFile(json, filename, mime) {
         var blob = new Blob([json], { type: mime });
         return new File([blob], filename, { type: mime, lastModified: Date.now() });
     }
-    // Paylaşım dosyasını tıklama anında (senkron) seç
+    // Bu ortam Web Share ile DOSYA paylaşımını gerçekten destekliyor mu?
+    function supportsFileShare() {
+        if (typeof navigator.share !== 'function') return false;
+        if (typeof navigator.canShare !== 'function') return false;
+        if (typeof File !== 'function' || typeof Blob !== 'function') return false;
+        try {
+            return navigator.canShare({ files: [buildShareFile('{}', 'test.json', 'application/json')] });
+        } catch (e) {
+            return false;
+        }
+    }
+    // Paylaşım dosyasını tıklama anında (senkron) seç — desteklenen ilk MIME türü
     function pickShareFile(json, filename) {
         if (typeof File !== 'function' || typeof Blob !== 'function') return null;
         var isAndroid = /Android/i.test(navigator.userAgent);
@@ -228,6 +249,12 @@
             } catch (e) { /* sonraki MIME */ }
         }
         return best;
+    }
+    function fmtBytes(n) {
+        if (n == null) return '';
+        if (n < 1024) return n + ' B';
+        if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+        return (n / 1048576).toFixed(1) + ' MB';
     }
     function formatAltitudeParts(altitude, floorName, floor) {
         var parts = [];
@@ -1415,88 +1442,79 @@
         }
     };
 
-    // Logları paylaş — .json dosyası olarak sistem paylaş menüsü (indirme değil).
+    // Logları paylaş — tek bir "paylaşım merkezi" modalı her ortamda çalışan
+    // en az bir yol sunar: Web Share (varsa) · panoya kopyala · indir · elle seç.
+    // iOS/Android tarayıcı + uygulama içi WebView + masaüstü için güvenli.
     SimpleLocatePanel.prototype._shareLogs = function (btn) {
         var json = this.logger.exportJSON();
         var filename = 'locate-log-' + Date.now() + '.json';
 
-        if (this._tryNativeShare(json, filename)) {
-            if (btn) {
-                var orig0 = btn.textContent;
-                btn.textContent = '✓ Paylaşılıyor…';
-                setTimeout(function () { btn.textContent = orig0; }, 2200);
-            }
-            return;
-        }
-
-        if (!navigator.share || typeof File !== 'function') {
-            this._copyLogsToClipboard(json, function () {
+        // Açık entegrasyon: host uygulama (WebView) native paylaşım köprüsü verdiyse ona devret.
+        var nativeCb = this.options && this.options.onShareLogs;
+        if (typeof nativeCb === 'function') {
+            try {
+                nativeCb({ json: json, filename: filename, mime: 'application/json' });
                 if (btn) {
-                    var o = btn.textContent;
-                    btn.textContent = '✕ Paylaşım yok — panoya kopyalandı';
-                    setTimeout(function () { btn.textContent = o; }, 2200);
+                    var o0 = btn.textContent;
+                    btn.textContent = '✓ Uygulamaya gönderildi';
+                    setTimeout(function () { btn.textContent = o0; }, 2200);
                 }
-            });
-            return;
+                return;
+            } catch (e) { /* modala düş */ }
         }
 
-        // Mobilde drawer içindeki tıklama Android'de user-gesture kaybettirebiliyor;
-        // paylaşımı ayrı tam ekran butonla tetikle (temiz gesture).
-        if (isMobileDevice()) {
-            this._showShareSheetModal(json, filename, btn);
-            return;
-        }
-
-        this._invokeFileShare(json, filename, btn, null);
+        this._showShareModal(json, filename);
     };
 
-    // Sistem paylaş menüsünü aç — yalnızca dosya, indirme yok
-    SimpleLocatePanel.prototype._invokeFileShare = function (json, filename, btn, onClose) {
-        var self = this;
+    // Web Share ile dosya paylaşımı — modal butonunun kendi tıklama gesture'ı içinde çağrılır.
+    SimpleLocatePanel.prototype._invokeFileShare = function (json, filename, statusBtn, onDone) {
         var file = pickShareFile(json, filename);
-        if (!file) {
-            this._copyLogsToClipboard(json, function () {
-                if (btn) {
-                    var o = btn.textContent;
-                    btn.textContent = '✕ Dosya oluşturulamadı — panoya kopyalandı';
-                    setTimeout(function () { btn.textContent = o; }, 2200);
-                }
-            });
-            return;
-        }
+        if (!file) { if (onDone) onDone(false); return; }
 
         var payload = { files: [file] };
-        if (/Android/i.test(navigator.userAgent)) {
-            payload.title = 'Konum logları';
-        }
+        if (/Android/i.test(navigator.userAgent)) payload.title = 'Konum logları';
 
         navigator.share(payload)
             .then(function () {
-                if (btn) {
-                    var o = btn.textContent;
-                    btn.textContent = '✓ Paylaşıldı';
-                    setTimeout(function () { btn.textContent = o; }, 2200);
-                }
-                if (onClose) onClose(true);
+                if (statusBtn) { statusBtn.classList.add('ok'); statusBtn.innerHTML = '✓ Paylaşıldı'; }
+                if (onDone) onDone(true);
             })
             .catch(function (err) {
-                if (err && err.name === 'AbortError') {
-                    if (onClose) onClose(false);
-                    return;
-                }
-                if (btn) {
-                    var o2 = btn.textContent;
-                    btn.textContent = '✕ Paylaşım açılamadı';
-                    setTimeout(function () { btn.textContent = o2; }, 2200);
-                }
-                if (onClose) onClose(false);
+                if (err && err.name === 'AbortError') { if (onDone) onDone(false); return; }
+                if (statusBtn) statusBtn.innerHTML = '✕ Paylaşım açılamadı';
+                if (onDone) onDone(false);
             });
     };
 
-    // Mobil paylaşım adımı — kullanıcı buradaki butona basınca menü açılır
-    SimpleLocatePanel.prototype._showShareSheetModal = function (json, filename, toolbarBtn) {
+    // Dosyayı indir (tarayıcılarda en güvenilir; bazı WebView'lerde engelli olabilir).
+    SimpleLocatePanel.prototype._downloadJson = function (json, filename) {
+        try {
+            var blob = new Blob([json], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.rel = 'noopener';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    };
+
+    // Paylaşım merkezi modalı — her platformda en az bir çalışan yol garanti eder.
+    SimpleLocatePanel.prototype._showShareModal = function (json, filename) {
         var self = this;
-        this._closeShareSheetModal();
+        this._closeShareModal();
+
+        var size = '';
+        try { size = fmtBytes(new Blob([json]).size); } catch (e) { /* yok say */ }
+        var count = (this.logger && this.logger.entries) ? this.logger.entries.length : 0;
+        var canShareFiles = supportsFileShare();
 
         var overlay = document.createElement('div');
         overlay.className = 'slp-share-overlay';
@@ -1507,88 +1525,110 @@
 
         var title = document.createElement('p');
         title.className = 'slp-share-title';
-        title.textContent = 'Log dosyasını paylaş';
+        title.textContent = 'Logları paylaş';
 
         var sub = document.createElement('p');
         sub.className = 'slp-share-sub';
-        sub.textContent = filename + ' · JSON dosyası olarak Slack, Drive vb. uygulamalara gönderilir.';
-
-        var openBtn = document.createElement('button');
-        openBtn.className = 'slp-share-open';
-        openBtn.textContent = '📤 Paylaş menüsünü aç';
-        openBtn.addEventListener('click', function () {
-            self._invokeFileShare(json, filename, toolbarBtn, function (ok) {
-                if (ok) self._closeShareSheetModal();
-            });
-        });
-
-        var copyBtn = document.createElement('button');
-        copyBtn.className = 'slp-share-ghost';
-        copyBtn.textContent = 'Panoya kopyala';
-        copyBtn.addEventListener('click', function () {
-            self._copyLogsToClipboard(json, function () {
-                copyBtn.textContent = '✓ Kopyalandı';
-                setTimeout(function () { copyBtn.textContent = 'Panoya kopyala'; }, 1500);
-            });
-        });
-
-        var cancelBtn = document.createElement('button');
-        cancelBtn.className = 'slp-share-cancel';
-        cancelBtn.textContent = 'İptal';
-        cancelBtn.addEventListener('click', function () { self._closeShareSheetModal(); });
-
-        overlay.addEventListener('click', function (e) {
-            if (e.target === overlay) self._closeShareSheetModal();
-        });
+        sub.textContent = filename + (size ? ' · ' + size : '') + (count ? ' · ' + count + ' olay' : '');
 
         card.appendChild(title);
         card.appendChild(sub);
-        card.appendChild(openBtn);
+
+        // 1) Web Share (destekleniyorsa) → sistem paylaş menüsü → Slack/Drive/Mail vb.
+        if (canShareFiles) {
+            var openBtn = document.createElement('button');
+            openBtn.className = 'slp-share-open';
+            openBtn.innerHTML = '📤 Uygulamayla paylaş';
+            openBtn.addEventListener('click', function () {
+                openBtn.disabled = true;
+                self._invokeFileShare(json, filename, openBtn, function (ok) {
+                    openBtn.disabled = false;
+                    if (ok) setTimeout(function () { self._closeShareModal(); }, 900);
+                });
+            });
+            card.appendChild(openBtn);
+        }
+
+        // 2) Panoya kopyala — neredeyse her ortamda çalışır
+        var copyBtn = document.createElement('button');
+        copyBtn.className = 'slp-share-ghost';
+        copyBtn.innerHTML = '📋 Panoya kopyala';
+        copyBtn.addEventListener('click', function () {
+            self._copyLogsToClipboard(json, function (ok) {
+                copyBtn.classList.toggle('ok', ok);
+                copyBtn.innerHTML = ok ? '✓ Kopyalandı' : '✕ Kopyalanamadı — metni elle seçin';
+                setTimeout(function () {
+                    copyBtn.classList.remove('ok');
+                    copyBtn.innerHTML = '📋 Panoya kopyala';
+                }, 1800);
+            });
+        });
         card.appendChild(copyBtn);
+
+        // 3) İndir — tarayıcılarda dosya olarak kaydet
+        var dlBtn = document.createElement('button');
+        dlBtn.className = 'slp-share-ghost';
+        dlBtn.innerHTML = '⬇ Dosyayı indir';
+        dlBtn.addEventListener('click', function () {
+            var ok = self._downloadJson(json, filename);
+            dlBtn.classList.toggle('ok', ok);
+            dlBtn.innerHTML = ok ? '✓ İndirildi' : '✕ İndirme engelli';
+            setTimeout(function () {
+                dlBtn.classList.remove('ok');
+                dlBtn.innerHTML = '⬇ Dosyayı indir';
+            }, 1800);
+        });
+        card.appendChild(dlBtn);
+
+        // 4) Garanti yedek: paylaşım/indirme/pano hepsi engelliyse metni elle seç-kopyala
+        var divider = document.createElement('div');
+        divider.className = 'slp-share-divider';
+        divider.textContent = 'veya metni elle kopyala';
+        card.appendChild(divider);
+
+        var ta = document.createElement('textarea');
+        ta.className = 'slp-share-text';
+        ta.readOnly = true;
+        ta.value = json;
+        ta.addEventListener('focus', function () { ta.select(); });
+        ta.addEventListener('click', function () { ta.select(); });
+        card.appendChild(ta);
+
+        var hint = document.createElement('p');
+        hint.className = 'slp-share-hint';
+        hint.textContent = 'Paylaşım veya indirme çalışmazsa kutuya dokunup tümünü seçin, kopyalayıp Slack’e yapıştırın.';
+        card.appendChild(hint);
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.className = 'slp-share-cancel';
+        cancelBtn.textContent = 'Kapat';
+        cancelBtn.addEventListener('click', function () { self._closeShareModal(); });
         card.appendChild(cancelBtn);
+
+        overlay.addEventListener('click', function (e) {
+            if (e.target === overlay) self._closeShareModal();
+        });
+
         overlay.appendChild(card);
         document.body.appendChild(overlay);
     };
 
-    SimpleLocatePanel.prototype._closeShareSheetModal = function () {
+    SimpleLocatePanel.prototype._closeShareModal = function () {
         var el = document.getElementById('slp-share-overlay');
         if (el) el.remove();
     };
 
-    // Host uygulama (WebView) native paylaşım köprüsü sağlayabilir
-    SimpleLocatePanel.prototype._tryNativeShare = function (json, filename) {
-        var cb = this.options && this.options.onShareLogs;
-        if (typeof cb === 'function') {
-            cb({ json: json, filename: filename, mime: 'application/json' });
-            return true;
-        }
-        if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
-            window.ReactNativeWebView.postMessage(JSON.stringify({
-                type: 'simpleLocateShareLogs', json: json, filename: filename
-            }));
-            return true;
-        }
-        if (window.Android && typeof window.Android.shareFile === 'function') {
-            window.Android.shareFile(json, filename, 'application/json');
-            return true;
-        }
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.shareLogs) {
-            window.webkit.messageHandlers.shareLogs.postMessage({ json: json, filename: filename });
-            return true;
-        }
-        return false;
-    };
-
-    SimpleLocatePanel.prototype._copyLogsToClipboard = function (text, feedback) {
-        var done = function () { feedback('✓ Panoya kopyalandı'); };
-        var fail = function () { feedback('✕ Paylaşım desteklenmiyor'); };
+    // Panoya kopyala — cb(success). Clipboard API yoksa/başarısızsa execCommand yedeği.
+    SimpleLocatePanel.prototype._copyLogsToClipboard = function (text, cb) {
+        cb = cb || function () {};
         if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(done, function () {
-                if (legacyCopy(text)) done(); else fail();
-            });
+            navigator.clipboard.writeText(text).then(
+                function () { cb(true); },
+                function () { cb(legacyCopy(text)); }
+            );
             return;
         }
-        if (legacyCopy(text)) done(); else fail();
+        cb(legacyCopy(text));
     };
 
     SimpleLocatePanel.prototype._section = function (pane, title) {
