@@ -103,14 +103,22 @@
         '.slp-hint{font-size:11px;color:#6b7280;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;' +
         'padding:7px 9px;margin-top:8px;line-height:1.4;}' +
         '.slp-float-status{position:fixed;top:max(10px,env(safe-area-inset-top,0px));left:50%;' +
-        'transform:translateX(-50%);z-index:99998;pointer-events:none;font-family:system-ui,-apple-system,sans-serif;}' +
-        '.slp-float-pill{display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;' +
+        'transform:translateX(-50%);z-index:99998;pointer-events:none;font-family:system-ui,-apple-system,sans-serif;' +
+        'max-width:calc(100vw - 24px);}' +
+        '.slp-float-pill{display:flex;align-items:stretch;gap:0;padding:5px 12px 5px 10px;border-radius:14px;' +
         'background:rgba(17,24,39,.88);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);' +
         'box-shadow:0 2px 14px rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.08);}' +
-        '.slp-float-pill .slp-badge{font-size:11px;padding:4px 10px;border-radius:10px;letter-spacing:.2px;}' +
-        '.slp-float-meta{font-size:11px;font-weight:600;color:#d1d5db;font-variant-numeric:tabular-nums;}' +
-        '.slp-float-gf{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.35px;padding:2px 7px;' +
-        'border-radius:8px;background:rgba(255,255,255,.08);}';
+        '.slp-float-left{display:flex;align-items:center;gap:6px;flex:1;min-width:0;flex-wrap:nowrap;}' +
+        '.slp-float-pill .slp-badge{font-size:10px;padding:3px 8px;border-radius:8px;letter-spacing:.2px;white-space:nowrap;flex-shrink:0;}' +
+        '.slp-float-meta{font-size:11px;font-weight:600;color:#d1d5db;font-variant-numeric:tabular-nums;white-space:nowrap;flex-shrink:0;}' +
+        '.slp-float-gf{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.35px;padding:2px 6px;' +
+        'border-radius:6px;background:rgba(255,255,255,.08);white-space:nowrap;flex-shrink:0;}' +
+        '.slp-float-divider{width:1px;margin:4px 10px 4px 6px;background:rgba(255,255,255,.12);align-self:stretch;flex-shrink:0;}' +
+        '.slp-float-alt{display:flex;flex-direction:column;justify-content:center;align-items:flex-end;gap:1px;' +
+        'flex-shrink:0;min-width:52px;}' +
+        '.slp-float-alt-val{font-size:13px;font-weight:700;color:#e8dcc8;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;}' +
+        '.slp-float-alt-floor{font-size:9px;font-weight:600;color:#b08d57;line-height:1.15;letter-spacing:.25px;' +
+        'text-transform:uppercase;white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis;}';
 
         var style = document.createElement('style');
         style.id = STYLE_ID;
@@ -176,6 +184,19 @@
         } catch (e) {
             return false;
         }
+    }
+    // Kat adını ada/log için tek satırda göster ("Zemin - Varış" → "Zemin · Varış")
+    function formatFloorLabel(floorName, floor) {
+        if (floorName) return String(floorName).replace(/\s*[-–—]\s*/g, ' · ').trim();
+        if (floor != null) return 'Kat ' + floor;
+        return null;
+    }
+    function formatAltitudeParts(altitude, floorName, floor) {
+        var parts = [];
+        if (altitude != null && isFinite(altitude)) parts.push('yük ' + num(altitude, 1) + 'm');
+        var fl = formatFloorLabel(floorName, floor);
+        if (fl) parts.push(fl);
+        return parts;
     }
 
     // ============================================================
@@ -438,8 +459,10 @@
             else if (cur.accuracyRejections > prev.accuracyRejections) { reason = 'düşük doğruluk'; this.stats.rejAccuracy++; }
             else if (cur.speedRejections > prev.speedRejections) { reason = 'aşırı hız (sıçrama)'; this.stats.rejSpeed++; }
             if (payload.locationError) reason = 'GPS hatası: ' + payload.locationError.message;
+            var rejParts = formatAltitudeParts(this.state.altitude, this.state.floorName, this.state.floor);
+            var rejSuffix = rejParts.length ? ' · ' + rejParts.join(' · ') : '';
             this.log('reject', payload.locationError ? 'error' : 'warn',
-                'Ham GPS reddedildi — ' + reason,
+                'Ham GPS reddedildi — ' + reason + rejSuffix,
                 { lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy, reason: reason });
             this._prevCoreStats = cur;
 
@@ -491,9 +514,10 @@
         var parts = [];
         parts.push('acc ' + num(payload.accuracy, 1) + 'm');
         if (payload.confidence != null) parts.push('güven %' + num(payload.confidence, 0));
-        if (payload.altitude != null && isFinite(payload.altitude)) parts.push('yük ' + num(payload.altitude, 1) + 'm');
-        if (payload.floorName) parts.push(payload.floorName);
-        else if (payload.floor != null) parts.push('kat ' + payload.floor);
+        var altVal = (payload.altitude != null && isFinite(payload.altitude)) ? payload.altitude : this.state.altitude;
+        var flName = payload.floorName != null ? payload.floorName : this.state.floorName;
+        var flNum = payload.floor != null ? payload.floor : this.state.floor;
+        parts = parts.concat(formatAltitudeParts(altVal, flName, flNum));
         if (payload.angle != null) parts.push(num(payload.angle, 0) + '°');
         if (payload.pdrStepCount != null && payload.isPDR) parts.push('adım ' + payload.pdrStepCount);
 
@@ -907,7 +931,11 @@
 
         var s = this.logger.getLiveStatus();
         var mi = MODE_INFO[s.mode] || MODE_INFO.idle;
-        var html = '<span class="slp-badge" style="background:' + mi.color + '">' + mi.label + '</span>';
+        var alt = s.altitude != null && isFinite(s.altitude) ? s.altitude : null;
+        var floorLbl = formatFloorLabel(s.floorName, s.floor);
+
+        var html = '<div class="slp-float-left">';
+        html += '<span class="slp-badge" style="background:' + mi.color + '">' + mi.label + '</span>';
         html += '<span class="slp-float-meta">' + fmtDur(s.modeFor) + '</span>';
 
         if (s.geofenceInside === false) {
@@ -917,17 +945,17 @@
         }
 
         if (s.drActive && s.drSteps > 0) {
-            html += '<span class="slp-float-meta" style="color:#c4b5fd">· ' + s.drSteps + ' adım</span>';
+            html += '<span class="slp-float-meta" style="color:#c4b5fd">' + s.drSteps + ' adım</span>';
         }
+        html += '</div>';
 
-        if (s.altitude != null && isFinite(s.altitude)) {
-            html += '<span class="slp-float-meta" style="color:#d6c9b0">· ' + s.altitude.toFixed(0) + 'm</span>';
+        html += '<div class="slp-float-divider"></div>';
+        html += '<div class="slp-float-alt">';
+        html += '<span class="slp-float-alt-val">' + (alt != null ? alt.toFixed(0) + ' m' : '-- m') + '</span>';
+        if (floorLbl) {
+            html += '<span class="slp-float-alt-floor">' + floorLbl + '</span>';
         }
-        if (s.floorName) {
-            html += '<span class="slp-float-meta" style="color:#d6c9b0">· ' + s.floorName + '</span>';
-        } else if (s.floor != null) {
-            html += '<span class="slp-float-meta" style="color:#d6c9b0">· kat ' + s.floor + '</span>';
-        }
+        html += '</div>';
 
         pill.innerHTML = html;
     };
@@ -948,11 +976,12 @@
         }
         if (s.altitude != null && isFinite(s.altitude)) {
             html += '<div class="slp-kv"><span class="k">Yükseklik</span><span class="v" style="color:#b08d57">' + s.altitude.toFixed(1) + ' m</span></div>';
+        } else {
+            html += '<div class="slp-kv"><span class="k">Yükseklik</span><span class="v" style="color:#64748b">--</span></div>';
         }
-        if (s.floorName) {
-            html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + s.floorName + '</span></div>';
-        } else if (s.floor != null) {
-            html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + s.floor + '</span></div>';
+        var liveFloor = formatFloorLabel(s.floorName, s.floor);
+        if (liveFloor) {
+            html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + liveFloor + '</span></div>';
         }
         this.statusEl.innerHTML = html;
     };
@@ -1348,9 +1377,8 @@
         }
     };
 
-    // Logları paylaş — webview'de indirme çalışmadığında ana çıkış yolu.
-    // Sıra: (1) Web Share API ile DOSYA paylaşımı (Slack'e .json olarak gider),
-    //       (2) Web Share API ile METİN paylaşımı, (3) panoya kopyalama yedeği.
+    // Logları paylaş — yerel paylaş menüsünde .json DOSYASI olarak açılır (metin değil).
+    // WebView'de navigator.share yoksa native bridge veya pano yedeği kullanılır.
     SimpleLocatePanel.prototype._shareLogs = function (btn) {
         var self = this;
         var json = this.logger.exportJSON();
@@ -1359,46 +1387,74 @@
         var feedback = function (txt) {
             if (!btn) return;
             btn.textContent = txt;
-            setTimeout(function () { btn.textContent = orig; }, 1800);
+            setTimeout(function () { btn.textContent = orig; }, 2200);
         };
         var restore = function () { if (btn) btn.textContent = orig; };
 
-        // 1) Dosya olarak paylaş (en iyi sonuç — Slack'e ek dosya gider)
-        try {
-            if (navigator.share && typeof File === 'function') {
-                var file = new File([json], filename, { type: 'application/json' });
-                if (!navigator.canShare || navigator.canShare({ files: [file] })) {
-                    navigator.share({ files: [file], title: 'Konum logları', text: 'SimpleLocate log kaydı' })
-                        .then(function () { feedback('✓ Paylaşıldı'); })
-                        .catch(function (err) {
-                            if (err && err.name === 'AbortError') { restore(); return; }
-                            self._shareTextOrCopy(json, btn, orig, feedback);
-                        });
-                    return;
-                }
-            }
-        } catch (e) { /* metin/pano yedeğine düş */ }
+        if (this._tryNativeShare(json, filename)) {
+            feedback('✓ Paylaşılıyor…');
+            return;
+        }
 
-        this._shareTextOrCopy(json, btn, orig, feedback);
+        if (!navigator.share || typeof File !== 'function') {
+            this._copyLogsToClipboard(json, function () {
+                feedback('✕ Paylaşım yok — panoya kopyalandı');
+            });
+            return;
+        }
+
+        // canShare bazı cihazlarda application/json için false döner ama share yine çalışır;
+        // bu yüzden doğrudan share dene, MIME türlerini sırayla dene, metin paylaşımına düşme.
+        var mimes = ['application/json', 'text/plain', 'application/octet-stream'];
+        var idx = 0;
+
+        function tryFileShare() {
+            if (idx >= mimes.length) {
+                self._copyLogsToClipboard(json, function () {
+                    feedback('✕ Dosya paylaşımı yok — panoya kopyalandı');
+                });
+                return;
+            }
+            var mime = mimes[idx++];
+            var file;
+            try {
+                file = new File([json], filename, { type: mime, lastModified: Date.now() });
+            } catch (e) {
+                tryFileShare();
+                return;
+            }
+            navigator.share({ files: [file], title: 'Konum logları' })
+                .then(function () { feedback('✓ Paylaşıldı'); })
+                .catch(function (err) {
+                    if (err && err.name === 'AbortError') { restore(); return; }
+                    tryFileShare();
+                });
+        }
+        tryFileShare();
     };
 
-    SimpleLocatePanel.prototype._shareTextOrCopy = function (json, btn, orig, feedback) {
-        var self = this;
-        var restore = function () { if (btn) btn.textContent = orig; };
-        // 2) Metin olarak paylaş (büyük olabilir; yine de dene)
-        if (navigator.share) {
-            try {
-                navigator.share({ title: 'Konum logları', text: json })
-                    .then(function () { feedback('✓ Paylaşıldı'); })
-                    .catch(function (err) {
-                        if (err && err.name === 'AbortError') { restore(); return; }
-                        self._copyLogsToClipboard(json, feedback);
-                    });
-                return;
-            } catch (e) { /* pano yedeğine düş */ }
+    // Host uygulama (WebView) native paylaşım köprüsü sağlayabilir
+    SimpleLocatePanel.prototype._tryNativeShare = function (json, filename) {
+        var cb = this.options && this.options.onShareLogs;
+        if (typeof cb === 'function') {
+            cb({ json: json, filename: filename, mime: 'application/json' });
+            return true;
         }
-        // 3) Pano yedeği
-        this._copyLogsToClipboard(json, feedback);
+        if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'simpleLocateShareLogs', json: json, filename: filename
+            }));
+            return true;
+        }
+        if (window.Android && typeof window.Android.shareFile === 'function') {
+            window.Android.shareFile(json, filename, 'application/json');
+            return true;
+        }
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.shareLogs) {
+            window.webkit.messageHandlers.shareLogs.postMessage({ json: json, filename: filename });
+            return true;
+        }
+        return false;
     };
 
     SimpleLocatePanel.prototype._copyLogsToClipboard = function (text, feedback) {
