@@ -158,6 +158,25 @@
         if (v == null || isNaN(v)) return '--';
         return Number(v).toFixed(d == null ? 0 : d);
     }
+    // Pano kopyalama yedeği (clipboard API yoksa / webview'de): gizli textarea + execCommand
+    function legacyCopy(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.top = '-9999px';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            ta.setSelectionRange(0, text.length);
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) {
+            return false;
+        }
+    }
 
     // ============================================================
     // LOG MOTORU
@@ -176,7 +195,10 @@
             mode: 'idle',
             modeSince: Date.now(),
             geofenceInside: null,
-            geofenceSince: Date.now()
+            geofenceSince: Date.now(),
+            altitude: null,        // son filtrelenmiş yükseklik (m, MSL)
+            floor: null,           // son tespit edilen kat
+            floorName: null        // son kat adı
         };
 
         // Aktif DR oturumu
@@ -401,6 +423,11 @@
         var inside = this.state.geofenceInside;
         var orientationOnly = !isRejected && this._isOrientationOnly(payload);
 
+        // Yükseklik/kat bilgisini her güncellemede yakala (canlı durumda güncel kalsın)
+        if (payload.altitude != null && isFinite(payload.altitude)) this.state.altitude = payload.altitude;
+        if (payload.floor != null) this.state.floor = payload.floor;
+        if (payload.floorName != null) this.state.floorName = payload.floorName;
+
         // ----- Red olayı (gösterim modundan ayrı) -----
         if (isRejected) {
             this.stats.rejected++;
@@ -464,6 +491,7 @@
         var parts = [];
         parts.push('acc ' + num(payload.accuracy, 1) + 'm');
         if (payload.confidence != null) parts.push('güven %' + num(payload.confidence, 0));
+        if (payload.altitude != null && isFinite(payload.altitude)) parts.push('yük ' + num(payload.altitude, 1) + 'm');
         if (payload.floorName) parts.push(payload.floorName);
         else if (payload.floor != null) parts.push('kat ' + payload.floor);
         if (payload.angle != null) parts.push(num(payload.angle, 0) + '°');
@@ -498,7 +526,10 @@
             geofenceFor: now - this.state.geofenceSince,
             drActive: !!this.drSession,
             drFor: this.drSession ? now - this.drSession.start : 0,
-            drSteps: this.drSession ? this.drSession.steps : 0
+            drSteps: this.drSession ? this.drSession.steps : 0,
+            altitude: this.state.altitude,
+            floor: this.state.floor,
+            floorName: this.state.floorName
         };
     };
 
@@ -819,6 +850,14 @@
         });
         toolbar.appendChild(csvBtn);
 
+        // Paylaş — webview'de indirme çalışmadığında yerel paylaş menüsü (Slack/WhatsApp/e-posta),
+        // desteklenmiyorsa panoya kopyalama yedeği
+        var shareBtn = document.createElement('button');
+        shareBtn.className = 'slp-btn';
+        shareBtn.textContent = '📤 Paylaş';
+        shareBtn.addEventListener('click', function () { self._shareLogs(shareBtn); });
+        toolbar.appendChild(shareBtn);
+
         pane.appendChild(toolbar);
 
         // Kategori filtre çipleri
@@ -881,6 +920,15 @@
             html += '<span class="slp-float-meta" style="color:#c4b5fd">· ' + s.drSteps + ' adım</span>';
         }
 
+        if (s.altitude != null && isFinite(s.altitude)) {
+            html += '<span class="slp-float-meta" style="color:#d6c9b0">· ' + s.altitude.toFixed(0) + 'm</span>';
+        }
+        if (s.floorName) {
+            html += '<span class="slp-float-meta" style="color:#d6c9b0">· ' + s.floorName + '</span>';
+        } else if (s.floor != null) {
+            html += '<span class="slp-float-meta" style="color:#d6c9b0">· kat ' + s.floor + '</span>';
+        }
+
         pill.innerHTML = html;
     };
 
@@ -897,6 +945,14 @@
         if (s.drActive) {
             html += '<div class="slp-kv"><span class="k">DR Süre</span><span class="v" style="color:#a855f7">' + fmtDur(s.drFor) + '</span></div>';
             html += '<div class="slp-kv"><span class="k">DR Adım</span><span class="v" style="color:#a855f7">' + s.drSteps + '</span></div>';
+        }
+        if (s.altitude != null && isFinite(s.altitude)) {
+            html += '<div class="slp-kv"><span class="k">Yükseklik</span><span class="v" style="color:#b08d57">' + s.altitude.toFixed(1) + ' m</span></div>';
+        }
+        if (s.floorName) {
+            html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + s.floorName + '</span></div>';
+        } else if (s.floor != null) {
+            html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + s.floor + '</span></div>';
         }
         this.statusEl.innerHTML = html;
     };
@@ -1290,6 +1346,71 @@
         } else {
             done();
         }
+    };
+
+    // Logları paylaş — webview'de indirme çalışmadığında ana çıkış yolu.
+    // Sıra: (1) Web Share API ile DOSYA paylaşımı (Slack'e .json olarak gider),
+    //       (2) Web Share API ile METİN paylaşımı, (3) panoya kopyalama yedeği.
+    SimpleLocatePanel.prototype._shareLogs = function (btn) {
+        var self = this;
+        var json = this.logger.exportJSON();
+        var filename = 'locate-log-' + Date.now() + '.json';
+        var orig = btn ? btn.textContent : '';
+        var feedback = function (txt) {
+            if (!btn) return;
+            btn.textContent = txt;
+            setTimeout(function () { btn.textContent = orig; }, 1800);
+        };
+        var restore = function () { if (btn) btn.textContent = orig; };
+
+        // 1) Dosya olarak paylaş (en iyi sonuç — Slack'e ek dosya gider)
+        try {
+            if (navigator.share && typeof File === 'function') {
+                var file = new File([json], filename, { type: 'application/json' });
+                if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+                    navigator.share({ files: [file], title: 'Konum logları', text: 'SimpleLocate log kaydı' })
+                        .then(function () { feedback('✓ Paylaşıldı'); })
+                        .catch(function (err) {
+                            if (err && err.name === 'AbortError') { restore(); return; }
+                            self._shareTextOrCopy(json, btn, orig, feedback);
+                        });
+                    return;
+                }
+            }
+        } catch (e) { /* metin/pano yedeğine düş */ }
+
+        this._shareTextOrCopy(json, btn, orig, feedback);
+    };
+
+    SimpleLocatePanel.prototype._shareTextOrCopy = function (json, btn, orig, feedback) {
+        var self = this;
+        var restore = function () { if (btn) btn.textContent = orig; };
+        // 2) Metin olarak paylaş (büyük olabilir; yine de dene)
+        if (navigator.share) {
+            try {
+                navigator.share({ title: 'Konum logları', text: json })
+                    .then(function () { feedback('✓ Paylaşıldı'); })
+                    .catch(function (err) {
+                        if (err && err.name === 'AbortError') { restore(); return; }
+                        self._copyLogsToClipboard(json, feedback);
+                    });
+                return;
+            } catch (e) { /* pano yedeğine düş */ }
+        }
+        // 3) Pano yedeği
+        this._copyLogsToClipboard(json, feedback);
+    };
+
+    SimpleLocatePanel.prototype._copyLogsToClipboard = function (text, feedback) {
+        var done = function () { feedback('✓ Panoya kopyalandı'); };
+        var fail = function () { feedback('✕ Paylaşım desteklenmiyor'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () {
+                if (legacyCopy(text)) done(); else fail();
+            });
+            return;
+        }
+        if (legacyCopy(text)) done(); else fail();
     };
 
     SimpleLocatePanel.prototype._section = function (pane, title) {
