@@ -256,6 +256,33 @@
         if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
         return (n / 1048576).toFixed(1) + ' MB';
     }
+    function genSessionId() {
+        try {
+            if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+        } catch (e) { /* fallback */ }
+        return 'sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    }
+    // UTF-8 metni gzip'leyip base64 döndür (CompressionStream yoksa null → sıkıştırmasız gönderilir)
+    function gzipBase64(text) {
+        if (typeof CompressionStream !== 'function' || typeof Blob !== 'function') {
+            return Promise.resolve(null);
+        }
+        try {
+            var blob = new Blob([text]);
+            var stream = blob.stream().pipeThrough(new CompressionStream('gzip'));
+            return new Response(stream).arrayBuffer().then(function (buf) {
+                var bytes = new Uint8Array(buf);
+                var binary = '';
+                var chunk = 0x8000;
+                for (var i = 0; i < bytes.length; i += chunk) {
+                    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+                }
+                return btoa(binary);
+            });
+        } catch (e) {
+            return Promise.resolve(null);
+        }
+    }
     function formatAltitudeParts(altitude, floorName, floor) {
         var parts = [];
         if (altitude != null && isFinite(altitude)) parts.push('yük ' + num(altitude, 1) + 'm');
@@ -674,6 +701,12 @@
 
         this.logger = new LocateLogger(ctrl, options);
 
+        // Otomatik log yükleme (çok kullanıcılı test için) — panelOptions.autoUpload
+        this.autoUpload = options.autoUpload || null;
+        this._sessionId = genSessionId();
+        this._sessionStart = Date.now();
+        this._uploadedThisSession = false;
+
         this._hookControl();
         this._buildDOM();
         this._bindLogger();
@@ -761,6 +794,26 @@
                     });
                 }
                 return result;
+            };
+        }
+
+        // Konum durdurulduğunda otomatik log yükleme (çok kullanıcılı test için)
+        if (typeof ctrl._unwatchGeolocation === 'function') {
+            var origUnwatch = ctrl._unwatchGeolocation;
+            ctrl._unwatchGeolocation = function () {
+                var r = origUnwatch.apply(this, arguments);
+                try { self._autoUploadLogs('stop'); } catch (e) {}
+                return r;
+            };
+        }
+        // Konum yeniden başlatılınca yeni oturum sayılsın (tekrar yükleyebilsin)
+        if (typeof ctrl._watchGeolocation === 'function') {
+            var origWatch = ctrl._watchGeolocation;
+            ctrl._watchGeolocation = function () {
+                self._sessionId = genSessionId();
+                self._sessionStart = Date.now();
+                self._uploadedThisSession = false;
+                return origWatch.apply(this, arguments);
             };
         }
 
@@ -1581,6 +1634,92 @@
     SimpleLocatePanel.prototype._closeShareModal = function () {
         var el = document.getElementById('slp-share-overlay');
         if (el) el.remove();
+    };
+
+    // Otomatik log yükleme — konum durdurulunca çalışır. Sayfa canlı olduğu için
+    // normal fetch (header + boyut sınırı yok) kullanılır. gzip ile sıkıştırılır.
+    // Config (panelOptions.autoUpload):
+    //   { enabled, url, apiKey, table?, label?, compress=true, minEntries=1,
+    //     provider='supabase', headers?, extra? }
+    SimpleLocatePanel.prototype._autoUploadLogs = function (reason) {
+        var cfg = this.autoUpload;
+        if (!cfg || cfg.enabled === false) return;
+        if (!cfg.url || !cfg.apiKey) return;
+        if (this._uploadedThisSession) return;
+
+        var entries = (this.logger && this.logger.entries) ? this.logger.entries : [];
+        var minEntries = cfg.minEntries != null ? cfg.minEntries : 1;
+        if (entries.length < minEntries) return;
+
+        this._uploadedThisSession = true; // çift göndermeyi engelle (başlangıçta işaretle)
+
+        var self = this;
+        var json = this.logger.exportJSON();
+        var origSize = json.length;
+        var doCompress = cfg.compress !== false;
+
+        var buildAndSend = function (payloadGz, payloadRaw) {
+            var stats = {};
+            try { stats = JSON.parse(json).stats || {}; } catch (e) {}
+            var row = {
+                session_id: self._sessionId,
+                label: cfg.label || null,
+                device: (navigator.userAgent || '').slice(0, 500),
+                platform: /Android/i.test(navigator.userAgent) ? 'android'
+                    : (/iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' : 'other'),
+                reason: reason || 'stop',
+                entry_count: entries.length,
+                duration_ms: Date.now() - self._sessionStart,
+                orig_bytes: origSize,
+                stats: stats
+            };
+            if (payloadGz) { row.payload_gz = payloadGz; row.compressed = true; }
+            else { row.payload = payloadRaw; row.compressed = false; }
+            if (cfg.extra && typeof cfg.extra === 'object') {
+                for (var k in cfg.extra) if (cfg.extra.hasOwnProperty(k)) row[k] = cfg.extra[k];
+            }
+
+            var headers = {
+                'Content-Type': 'application/json',
+                'apikey': cfg.apiKey,
+                'Authorization': 'Bearer ' + cfg.apiKey,
+                'Prefer': 'return=minimal'
+            };
+            if (cfg.headers && typeof cfg.headers === 'object') {
+                for (var h in cfg.headers) if (cfg.headers.hasOwnProperty(h)) headers[h] = cfg.headers[h];
+            }
+
+            fetch(cfg.url, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(row),
+                keepalive: true,
+                mode: 'cors'
+            }).then(function (res) {
+                if (res && res.ok) {
+                    if (self.logger) self.logger.log('system', 'success',
+                        'Loglar otomatik kaydedildi (' + (row.compressed ? fmtBytes((payloadGz || '').length) + ' gz' : fmtBytes(origSize)) + ')',
+                        { session: self._sessionId, reason: row.reason });
+                } else {
+                    self._uploadedThisSession = false; // başarısız → sonraki durdurmada tekrar dene
+                    if (self.logger) self.logger.log('system', 'error',
+                        'Otomatik log yükleme başarısız (HTTP ' + (res ? res.status : '?') + ')', null);
+                }
+            }).catch(function (err) {
+                self._uploadedThisSession = false;
+                if (self.logger) self.logger.log('system', 'error',
+                    'Otomatik log yükleme hatası: ' + (err && err.message ? err.message : 'ağ'), null);
+            });
+        };
+
+        if (doCompress) {
+            gzipBase64(json).then(function (gz) {
+                if (gz) buildAndSend(gz, null);
+                else buildAndSend(null, json); // CompressionStream yoksa sıkıştırmasız
+            });
+        } else {
+            buildAndSend(null, json);
+        }
     };
 
     // Panoya kopyala — cb(success). Clipboard API yoksa/başarısızsa execCommand yedeği.

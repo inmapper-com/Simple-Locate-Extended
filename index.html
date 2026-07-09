@@ -118,6 +118,18 @@
                 { floor: 3, name: "3", minAlt: 2500, maxAlt: 3000 },
             ],
 
+            // Otomatik log yükleme — konum durdurulunca Supabase'e kaydeder
+            panelOptions: {
+                autoUpload: {
+                    enabled: true,
+                    url: 'https://qzqnccxrkmjrlwsukgpi.supabase.co/rest/v1/test_logs',
+                    apiKey: 'sb_publishable_-HMpCAG0-VU28lx3SXlE-A_5NRZxs93',
+                    label: 'test',
+                    compress: true,
+                    minEntries: 5
+                }
+            },
+
             afterDeviceMove: function (location) {
                 // Konum güncellemelerini burada işleyebilirsiniz
             }
