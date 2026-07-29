@@ -241,7 +241,8 @@
             
             // Hız Bazlı Sıçrama Tespiti
             maxHumanSpeed: 5,             // Maksimum insan yürüyüş hızı (m/s) - ~18 km/h
-            maxIndoorSpeed: 3,            // İç mekanda maksimum kabul edilebilir hız (m/s)
+            maxIndoorSpeed: 6,            // İç mekanda maks hız (m/s) — multipath teleportda
+                                          // last-good'a düşmeyi azaltmak için 3'ten yükseltildi
             
             // Son İyi Konum Fallback
             enableLastGoodLocation: true, // Kötü konum geldiğinde son iyi konumu kullan
@@ -250,11 +251,22 @@
             fallbackHysteresisMs: 2500,   // Gerçek ↔ fallback görünümü arası geçiş için kararlılık süresi (ms)
                                           // (geofence sınırında salınan filtrelenmiş konumun mod titretmesini engeller)
             
-            // İç Mekan Optimizasyonları
+            // İç Mekan Optimizasyonları (yürürken lag azaltmak için daha hafif varsayılanlar)
             indoorMode: true,             // İç mekan modu aktif
-            indoorMedianWindowSize: 7,    // İç mekanda daha büyük median penceresi
-            indoorKalmanR: 0.5,           // İç mekanda ölçüme daha az güven
-            indoorLowPassTau: 1.0,        // İç mekanda daha agresif yumuşatma
+            indoorMedianWindowSize: 3,    // İç mekan median tabanı (yürürken ≤3 tutulur)
+            indoorKalmanR: 0.25,          // İç mekan Kalman R tabanı (ölçüme daha hızlı güvenir)
+            indoorLowPassTau: 0.4,        // İç mekan low-pass tau (daha hızlı tepki)
+            
+            // ── Açılış (cold-start) kapısı ──
+            // İlk geofence-içi fix kapıya yapışıp last-good/Kalman'ı zehirlemesin diye:
+            // birkaç tutarlı, yeterince iyi accuracy'li fix gelene kadar GERÇEK KONUM gösterme;
+            // last-good yazmayı da kısa süre ertele.
+            coldStartGate: true,
+            coldStartMaxAccuracy: 35,     // Açılışta kabul için maks accuracy (m)
+            coldStartMinFixes: 3,         // Kaç tutarlı içeride fix gerekir
+            coldStartConsistentDistance: 45, // Adaylar birbirinden en fazla bu kadar uzak olabilir (m)
+            coldStartLastGoodDelayMs: 8000,  // Oturum başından bu süre last-good yazma
+            coldStartTimeoutMs: 20000,    // Bu süre dolunca kapıyı zorla aç (sonsuz bekleme olmasın)
             
             // Konum Geçerleme
             enablePositionValidation: true, // Konum doğrulama aktif
@@ -528,7 +540,8 @@
                 }
             };
 
-            // Hareket tespiti için ayrı geçmiş (Low Pass filtrelenmiş konumlar)
+            // Hareket tespiti için ayrı geçmiş (HAM GPS — LPF çıktısından değil;
+            // aksi halde lag'li konum "hareketsiz" sanılıp yumuşatma kısır döngüsü oluşur)
             this._movementHistory = {
                 positions: [],
                 timestamps: [],
@@ -548,6 +561,13 @@
             
             // Kötü konum sayacı
             this._consecutiveBadLocations = 0;
+
+            // Konum oturumu / açılış kapısı
+            this._locateSessionStart = null;
+            this._coldStart = {
+                ready: false,
+                candidates: []
+            };
             
             // Konum geçmişi (hız hesaplaması için)
             this._locationHistory = {
@@ -921,6 +941,15 @@
         
         // Son iyi konumu güncelle
         _updateLastGoodLocation: function (position, confidence) {
+            // Açılışta last-good yazma — kapıya yakın ilk fix'in kilitlenmesini önler
+            if (this._locateSessionStart &&
+                (Date.now() - this._locateSessionStart) < (this.options.coldStartLastGoodDelayMs || 0)) {
+                return;
+            }
+            if (this.options.coldStartGate && this._coldStart && !this._coldStart.ready) {
+                return;
+            }
+
             // Geofence kontrolü - sadece alan İÇİNDE olan konumları kaydet
             const geofenceCheck = this._isInsideGeofence(position.latitude, position.longitude);
             
@@ -941,6 +970,63 @@
                     // Alan dışı konum son iyi konum olarak kaydedilmedi
                 }
             }
+        },
+
+        // Açılış kapısı: ilk GERÇEK KONUM için birkaç tutarlı, yeterince iyi fix bekle.
+        // Dönüş: true → gösterime izin ver; false → henüz gösterme (bekle).
+        _passColdStartGate: function (filteredPosition) {
+            if (!this.options.coldStartGate) return true;
+            if (!this._coldStart) this._coldStart = { ready: false, candidates: [] };
+            if (this._coldStart.ready) return true;
+
+            // Fallback / PDR / red yolları kapıyı etkilemez (ayrı gösterim)
+            if (!filteredPosition || filteredPosition.isFallback || filteredPosition.isPDR) {
+                return true;
+            }
+
+            var now = Date.now();
+            var started = this._locateSessionStart || now;
+            if ((now - started) >= (this.options.coldStartTimeoutMs || 20000)) {
+                this._coldStart.ready = true;
+                this._coldStart.candidates = [];
+                return true;
+            }
+
+            var acc = filteredPosition.accuracy;
+            if (acc == null || acc > (this.options.coldStartMaxAccuracy || 35)) {
+                return false;
+            }
+
+            var lat = filteredPosition.latitude;
+            var lng = filteredPosition.longitude;
+            if (lat == null || lng == null) return false;
+
+            var candidates = this._coldStart.candidates;
+            candidates.push({ lat: lat, lng: lng, accuracy: acc, t: now });
+            // Sadece son N adayı tut
+            var need = this.options.coldStartMinFixes || 3;
+            while (candidates.length > need) candidates.shift();
+
+            if (candidates.length < need) return false;
+
+            // Adaylar birbirine yakın mı?
+            var maxDist = this.options.coldStartConsistentDistance || 45;
+            var i, j;
+            for (i = 0; i < candidates.length; i++) {
+                for (j = i + 1; j < candidates.length; j++) {
+                    var d = L.latLng(candidates[i].lat, candidates[i].lng)
+                        .distanceTo(L.latLng(candidates[j].lat, candidates[j].lng));
+                    if (d > maxDist) {
+                        // Tutarsız küme — en eskiyi at, yeniden biriktir
+                        candidates.shift();
+                        return false;
+                    }
+                }
+            }
+
+            this._coldStart.ready = true;
+            this._coldStart.candidates = [];
+            return true;
         },
         
         // Konum geçmişini güncelle
@@ -1172,12 +1258,9 @@
             this._updateLocationHistory(position);
             
             // ========== ADIM 5: İÇ MEKAN OPTİMİZASYONLARI ==========
-            // İç mekan modunda filtre parametrelerini dinamik olarak ayarla
+            // Taban değerler; yürüyüş/accuracy adaptasyonu aşağıda üzerine yazar
             if (isIndoorMode) {
-                // Daha büyük median penceresi
                 this._medianFilter.windowSize = this.options.indoorMedianWindowSize;
-                
-                // Daha yüksek Kalman R değeri (ölçüme daha az güven)
                 this._kalmanFilter.R_lat = this.options.indoorKalmanR;
                 this._kalmanFilter.R_lng = this.options.indoorKalmanR;
             }
@@ -1198,106 +1281,93 @@
                 accuracy: position.accuracy
             };
 
+            // Hareket geçmişini HAM GPS ile güncelle (LPF'den önce).
+            // LPF çıktısından bakmak lag'li konumu "hareketsiz" gösterir → yumuşatma kısır döngüsü.
+            this._updateMovementHistory(position);
+            const isUserMovingEarly = this._detectUserMoving();
+
             // Low Pass Filter'ı uygula
             let lowPassFiltered = position;
 
             if (this.options.enableLowPassFilter !== false && typeof LowPassFilter !== 'undefined') {
                 // Low Pass Filter'ları ilk kullanım için başlat
                 if (!this._lowPassFilterInitialized) {
-                    // iOS için özel düzeltme: iOS'ta geolocation güncellemeleri daha az sıklıkta gelebilir
-                    // Örnek frekansı dinamik olarak hesaplayacağız, başlangıçta 1 Hz varsayalım
                     const sampleFrequency = 1.0;
+                    // İç mekanda indoorLowPassTau; dışarıda lowPassFilterTau
+                    const tau = (isIndoorMode
+                        ? (this.options.indoorLowPassTau || this.options.lowPassFilterTau)
+                        : this.options.lowPassFilterTau) || 0.5;
 
-                    // Filtrenin zaman sabitini kullanıcı seçeneğinden al
-                    // iOS için biraz daha düşük tau kullan (daha hızlı tepki)
-                    const tau = this.options.lowPassFilterTau || 1.0;
-
-                    // LowPassFilter nesnelerini oluştur
                     this._lowPassFilterLat = new LowPassFilter(sampleFrequency, tau);
                     this._lowPassFilterLng = new LowPassFilter(sampleFrequency, tau);
 
-                    // İlk değerleri ayarla
                     this._lowPassFilterLat.addSample(position.latitude);
                     this._lowPassFilterLng.addSample(position.longitude);
 
-                    // Filtre başlatıldı
                     this._lowPassFilterInitialized = true;
-
-                    // Son timestamp'i kaydet (iOS için)
                     this._lastLowPassTimestamp = position.timestamp || Date.now();
 
-                    // İlk filtreleme için ham değerleri kullan
                     lowPassFiltered = position;
                 } else {
-                    // iOS için özel düzeltme: Timestamp farkını kullanarak örnekleme frekansını hesapla
                     const currentTimestamp = position.timestamp || Date.now();
-                    const timeDiff = Math.abs(currentTimestamp - (this._lastLowPassTimestamp || currentTimestamp)) / 1000; // saniye cinsinden
+                    const timeDiff = Math.abs(currentTimestamp - (this._lastLowPassTimestamp || currentTimestamp)) / 1000;
 
-                    // iOS'ta timestamp'ler bazen düzgün gelmeyebilir veya çok büyük gecikmeler olabilir
-                    // Eğer zaman farkı çok küçükse (< 0.1s) veya çok büyükse (> 60s), varsayılan değeri kullan
                     let actualSampleFrequency = 1.0;
                     if (timeDiff > 0.1 && timeDiff < 60) {
                         actualSampleFrequency = 1.0 / timeDiff;
                     }
 
-                    // Örnekleme frekansını güncelle (iOS için)
                     if (this._lowPassFilterLat.setSampleFrequency) {
                         this._lowPassFilterLat.setSampleFrequency(actualSampleFrequency);
                         this._lowPassFilterLng.setSampleFrequency(actualSampleFrequency);
                     }
 
-                    // Timestamp'i güncelle
                     this._lastLowPassTimestamp = currentTimestamp;
 
-                    // Tau değerini kullanıcının hareketi durumuna göre dinamik olarak ayarla
-                    let dynamicTau = this.options.lowPassFilterTau || 1.0;
+                    // Taban tau: iç mekanda indoorLowPassTau
+                    let dynamicTau = (isIndoorMode
+                        ? (this.options.indoorLowPassTau || this.options.lowPassFilterTau)
+                        : this.options.lowPassFilterTau) || 0.5;
 
-                    // Hareket durumuna göre ayarlama
-                    // Not: Hareket geçmişi Low Pass filtrelenmiş konumdan sonra güncellenecek
-                    if (this._detectUserMoving()) {
-                        // Hareket halindeyse daha düşük tau (daha hızlı tepki)
-                        dynamicTau = Math.max(0.3, dynamicTau / 2);
+                    if (isUserMovingEarly) {
+                        // Yürürken hızlı tepki — lag'in ana düşmanı
+                        dynamicTau = Math.max(0.2, dynamicTau * 0.5);
                     } else {
-                        // Durağan haldeyse daha yüksek tau (daha fazla yumuşatma)
-                        dynamicTau = Math.min(2.0, dynamicTau * 1.5);
+                        dynamicTau = Math.min(1.5, dynamicTau * 1.25);
                     }
 
-                    // Doğruluk durumuna göre ayarlama
+                    // Düşük doğrulukta yumuşatmayı artır — AMA yürürken sınırlı tut
                     if (position.accuracy > 20) {
-                        // Düşük doğrulukta daha agresif filtreleme
-                        dynamicTau = Math.min(3.0, dynamicTau * 1.5);
+                        if (isUserMovingEarly) {
+                            dynamicTau = Math.min(0.6, dynamicTau * 1.15);
+                        } else {
+                            dynamicTau = Math.min(2.5, dynamicTau * 1.4);
+                        }
                     }
 
-                    // iOS için özel düzeltme: Eğer zaman farkı çok büyükse (> 10s),
-                    // tau değerini düşür (daha hızlı adapte ol)
                     if (timeDiff > 10) {
                         dynamicTau = Math.max(0.2, dynamicTau / 2);
                     }
 
-                    // Tau değerini güncelle
                     this._lowPassFilterLat.setTau(dynamicTau);
                     this._lowPassFilterLng.setTau(dynamicTau);
 
-                    // Yeni örnekleri ekle ve filtreleme yap
                     this._lowPassFilterLat.addSample(position.latitude);
                     this._lowPassFilterLng.addSample(position.longitude);
 
-                    // Filtrelenmiş değerleri al
                     const filteredLat = this._lowPassFilterLat.lastOutput();
                     const filteredLng = this._lowPassFilterLng.lastOutput();
 
-                    // iOS için özel düzeltme: Eğer filtrelenmiş değer ham değerden çok uzaksa,
-                    // iOS'ta kuzeye kayma sorunu olabilir, filtrelenmiş değeri sınırla
                     const filteredDistance = L.latLng(position.latitude, position.longitude)
                         .distanceTo(L.latLng(filteredLat, filteredLng));
 
-                    const maxAllowedDistance = Math.max(position.accuracy * 1.5, 15); // En az 15m
+                    const maxAllowedDistance = Math.max(position.accuracy * 1.5, 15);
 
                     if (filteredDistance > maxAllowedDistance) {
-                        // Dinamik blend faktörü: Mesafe ve accuracy'ye göre hesapla
-                        // Mesafe arttıkça blend faktörü artar (daha fazla ham değer kullan)
                         const normalizedDistance = Math.min(1.0, filteredDistance / (maxAllowedDistance * 2));
-                        const blendFactor = Math.min(0.8, Math.max(0.3, 0.3 + normalizedDistance * 0.5));
+                        // Yürürken ham değere daha çok güven
+                        const blendMin = isUserMovingEarly ? 0.45 : 0.3;
+                        const blendFactor = Math.min(0.85, Math.max(blendMin, blendMin + normalizedDistance * 0.5));
 
                         lowPassFiltered = {
                             latitude: blendFactor * position.latitude + (1 - blendFactor) * filteredLat,
@@ -1306,7 +1376,6 @@
                             timestamp: position.timestamp,
                             lpfApplied: true
                         };
-
                     } else {
                         lowPassFiltered = {
                             latitude: filteredLat,
@@ -1316,39 +1385,29 @@
                             lpfApplied: true
                         };
                     }
-
                 }
             } else if (this.options.enableLowPassFilter !== false && typeof LowPassFilter === 'undefined') {
-                // LowPassFilter kütüphanesi yüklenemedi, atlanıyor
-                // Low Pass Filter olmadan devam et
                 lowPassFiltered = position;
             }
 
-
-            // Hareket geçmişini güncelle (Low Pass filtrelenmiş konum ile)
-            // Bu, hareket tespiti için kullanılacak
-            this._updateMovementHistory(lowPassFiltered);
-
-            // Performans optimizasyonu: Çok düşük doğruluk değerlerinde (çok kötü GPS sinyali - binalarda)
-            // daha agresif filtreleme yap, yüksek doğruluk değerlerinde (iyi GPS sinyali - açık alanda)
-            // daha az filtreleme yap
+            // Performans / lag: accuracy ve hareket durumuna göre median penceresi
             const isLowAccuracyNow = lowPassFiltered.accuracy > 20;
+            const baseMedian = isIndoorMode
+                ? (this.options.indoorMedianWindowSize || 3)
+                : (this.options.medianWindowSize || 3);
 
-            // 2. Median filtre her zaman uygula, ancak pencere boyutu accuracy'ye göre ayarla
-            // iOS için özel: Log analizine göre iOS'ta daha büyük pencere gerekli
             let medianWindowSize;
-            if (isIOSDevice && isLowAccuracyNow) {
-                // iOS + düşük accuracy: En büyük pencere (7-9)
-                medianWindowSize = Math.min(9, Math.floor(this.options.medianWindowSize * 1.5));
+            if (isUserMovingEarly) {
+                // Yürürken kısa pencere — kapı örneklerini tutma
+                medianWindowSize = Math.min(3, baseMedian);
+            } else if (isIOSDevice && isLowAccuracyNow) {
+                medianWindowSize = Math.min(7, Math.max(baseMedian, baseMedian + 2));
             } else if (isIOSDevice) {
-                // iOS + normal accuracy: Biraz büyütülmüş pencere (5-7)
-                medianWindowSize = Math.min(7, this.options.medianWindowSize + 2);
+                medianWindowSize = Math.min(5, baseMedian + 1);
             } else if (isLowAccuracyNow) {
-                // Android + düşük accuracy: Normal pencere
-                medianWindowSize = this.options.medianWindowSize;
+                medianWindowSize = baseMedian;
             } else {
-                // Android + yüksek accuracy: Küçük pencere
-                medianWindowSize = Math.max(3, Math.floor(this.options.medianWindowSize * 0.6));
+                medianWindowSize = Math.max(3, Math.floor(baseMedian * 0.8));
             }
             
             const originalWindowSize = this._medianFilter.windowSize;
@@ -1395,63 +1454,58 @@
             }
 
             // 3. Kalman filtresi uygula, duruma göre parametre ayarla
-            // Kalman filtresi ayarlarını hareket durumuna göre ayarla
-            // Hareket geçmişi zaten Low Pass filtrelenmiş konum ile güncellendi
-            const isUserMoving = this._detectUserMoving();
+            // Hareket tespiti ham GPS geçmişinden (yukarıda güncellendi)
+            const isUserMoving = isUserMovingEarly;
 
             // Hareket durumuna göre Kalman filtre parametreleri
             if (isUserMoving) {
-                // Hareket halinde daha hızlı tepki vermeli
-                this._kalmanFilter.Q_lat = this._kalmanFilter.Q_lng = this.options.kalmanProcessNoise * 2;
+                // Yürürken process noise yükselt — sabit-konum modelinin lag'ini kır
+                this._kalmanFilter.Q_lat = this._kalmanFilter.Q_lng = this.options.kalmanProcessNoise * 4;
             } else {
-                // Durağan haldeyken daha stabil filtreleme
                 this._kalmanFilter.Q_lat = this._kalmanFilter.Q_lng = this.options.kalmanProcessNoise / 2;
             }
 
             // Kalman parametrelerini ayarla
-            // İyileştirme: Kalman'a her zaman Low Pass filtrelenmiş değeri gönder
-            // Sadece sıçrama varsa median filtrelenmiş değeri kullan
             let kalmanInput;
             if (isJump) {
-                // Ani sıçrama tespit edildiğinde ölçüme daha az güven
-                // iOS için daha yüksek R değeri (daha az güven)
-                this._kalmanFilter.R_lat = this._kalmanFilter.R_lng = isIOSDevice ? 1.5 : 1.0;
-                // Median filtrelenmiş değeri kullan (sıçramayı temizlemiş olur)
+                this._kalmanFilter.R_lat = this._kalmanFilter.R_lng = isIOSDevice ? 1.2 : 0.9;
                 kalmanInput = medianFiltered;
             } else {
-                // Doğruluğa göre dinamik olarak Kalman filtre parametresini ayarla
-                // iOS için özel: Log analizine göre daha yüksek R gerekli (ölçümlere daha az güven)
                 let adaptiveR;
+                const indoorR = this.options.indoorKalmanR || 0.25;
                 if (isIOSDevice) {
-                    // iOS: Daha yüksek R değeri (0.1-0.8 arası)
-                    adaptiveR = Math.max(0.1, Math.min(0.8, lowPassFiltered.accuracy / 15));
+                    adaptiveR = Math.max(isIndoorMode ? indoorR * 0.6 : 0.08,
+                        Math.min(isUserMoving ? 0.45 : 0.7, lowPassFiltered.accuracy / (isUserMoving ? 22 : 15)));
                 } else {
-                    // Android: Normal R değeri (0.05-0.5 arası)
-                    adaptiveR = Math.max(0.05, Math.min(0.5, lowPassFiltered.accuracy / 20));
+                    adaptiveR = Math.max(isIndoorMode ? indoorR * 0.5 : 0.05,
+                        Math.min(isUserMoving ? 0.3 : 0.5, lowPassFiltered.accuracy / (isUserMoving ? 28 : 20)));
+                }
+                // İç mekan tabanı ile harmanla
+                if (isIndoorMode) {
+                    adaptiveR = Math.min(adaptiveR, Math.max(indoorR, adaptiveR * 0.85));
                 }
                 this._kalmanFilter.R_lat = this._kalmanFilter.R_lng = adaptiveR;
-
-                // Her zaman Low Pass filtrelenmiş değeri kullan (tutarlılık için)
                 kalmanInput = lowPassFiltered;
             }
 
             // 4. Kalman filtresini uygula
             const kalmanFiltered = this._applyKalmanFilter(kalmanInput);
             
-            // iOS için özel: Durağan halindeki küçük hareketleri filtrele
-            // Log analizine göre iOS'ta durağan halinde bile 0.3-2m arası sürekli hareket var
-            if (isIOSDevice && this._weiYeState.lastFilteredPosition && !isUserMoving) {
+            // iOS: Durağan halindeki küçük gürültüyü tut — ama yürüyüş / kötü acc / PDR'de uygulama
+            if (isIOSDevice && this._weiYeState.lastFilteredPosition && !isUserMoving &&
+                !(this._pdr && this._pdr.active) &&
+                (position.accuracy == null || position.accuracy <= 25)) {
                 const distanceFromLast = L.latLng(
                     this._weiYeState.lastFilteredPosition.latitude,
                     this._weiYeState.lastFilteredPosition.longitude
                 ).distanceTo(L.latLng(kalmanFiltered.latitude, kalmanFiltered.longitude));
                 
-                // Durağan halinde 2m'den az hareket varsa, önceki konumu döndür (gürültüyü yok say)
-                if (distanceFromLast < 2.0) {
+                // Eşiği 2m → 1.2m düşür (yavaş yürüyüşü daha az dondurur)
+                if (distanceFromLast < 1.2) {
                     return {
                         latitude: this._weiYeState.lastFilteredPosition.latitude,
                         longitude: this._weiYeState.lastFilteredPosition.longitude,
-                        accuracy: kalmanFiltered.accuracy, // Accuracy'yi güncelle
+                        accuracy: kalmanFiltered.accuracy,
                         timestamp: position.timestamp
                     };
                 }
@@ -1566,6 +1620,10 @@
                     this._updateButton();
                     this._map.on("layeradd", this._onLayerAdd, this);
 
+                    // Yeni konum oturumu — açılış kapısı / last-good gecikmesi
+                    this._locateSessionStart = Date.now();
+                    this._coldStart = { ready: false, candidates: [] };
+
                     this._checkGeolocation().then((event) => {
                         this._geolocation = true;
                         this._onLocationFound(event.coords);
@@ -1637,6 +1695,10 @@
             
             // Kötü konum sayacı sıfırla
             this._consecutiveBadLocations = 0;
+
+            // Açılış kapısını sıfırla — yeni oturum
+            this._locateSessionStart = Date.now();
+            this._coldStart = { ready: false, candidates: [] };
 
             // Fallback histerezisini sıfırla
             this._isFallbackLocation = false;
@@ -1971,6 +2033,12 @@
                 return;
             }
             this._isFallbackLocation = false;
+
+            // Açılış kapısı: ilk GERÇEK KONUM için tutarlı/iyi accuracy'li fix'ler bekle
+            // (kapıya yakın cold-start fix'inin hemen kilitlenmesini önler)
+            if (!this._passColdStartGate(filteredPosition)) {
+                return;
+            }
 
             // A3: dış mekanda hareket halinde GPS yönüyle heading'i düzelt
             this._applyGpsCourseToHeading();
@@ -3360,8 +3428,7 @@
             };
         },
 
-        // Kullanıcı hareketini tespit et
-        // İyileştirme: Ayrı hareket geçmişi kullan (Low Pass filtrelenmiş konumlar)
+        // Kullanıcı hareketini tespit et (HAM GPS geçmişinden)
         _detectUserMoving: function () {
             const mh = this._movementHistory;
 
@@ -3387,23 +3454,18 @@
                 }
             }
 
-            // iOS için özel düzeltme: iOS'ta timestamp'ler bazen düzgün gelmeyebilir
-            // Eğer zaman aralığı çok küçükse veya çok büyükse, varsayılan olarak hareket halinde kabul et
-            if (timeSpan < 100 || timeSpan > 60000) { // 100ms'den az veya 60 saniyeden fazla
+            if (timeSpan < 100 || timeSpan > 60000) {
                 return true;
             }
 
-            // Hızı hesapla (m/s)
-            const avgSpeed = (totalDistance / (timeSpan / 1000)); // m/s
-
-            // iOS için özel: Log analizine göre iOS'ta durağan halinde bile 0.3-2m/s hareket var
-            // Daha yüksek eşik kullan
-            const speedThreshold = this._isIOS ? 0.8 : 0.5; // iOS: 0.8 m/s, Android: 0.5 m/s
+            const avgSpeed = (totalDistance / (timeSpan / 1000));
+            // Ham GPS ile eşik biraz daha düşük olabilir (LPF kadar şişmez)
+            const speedThreshold = this._isIOS ? 0.55 : 0.35;
 
             return avgSpeed > speedThreshold;
         },
 
-        // Hareket geçmişini güncelle
+        // Hareket geçmişini güncelle (ham GPS konumlarıyla çağrılmalı)
         _updateMovementHistory: function (position) {
             const mh = this._movementHistory;
             const timestamp = position.timestamp || Date.now();

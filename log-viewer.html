@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SimpleLocate — Log Görüntüleyici</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        :root {
+            --bg: #0f172a;
+            --panel: #1e293b;
+            --panel2: #172033;
+            --border: #334155;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+            --accent: #3b82f6;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 10px 16px;
+            background: var(--panel);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+
+        header h1 { font-size: 15px; margin: 0; font-weight: 700; }
+        header .sub { font-size: 12px; color: var(--muted); }
+        .tabs { display: flex; gap: 6px; margin-left: auto; }
+        .tab {
+            padding: 6px 12px; border: 1px solid var(--border); background: var(--panel2);
+            color: var(--muted); border-radius: 7px; font-size: 12px; font-weight: 600; cursor: pointer;
+        }
+        .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+        main { flex: 1; display: flex; min-height: 0; }
+
+        .side {
+            width: 320px; border-right: 1px solid var(--border); background: var(--panel2);
+            display: flex; flex-direction: column; min-height: 0; flex-shrink: 0;
+        }
+        .pane-body { flex: 1; overflow-y: auto; padding: 14px; }
+
+        label { display: block; font-size: 11px; color: var(--muted); margin: 10px 0 4px; font-weight: 600; }
+        input, textarea {
+            width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+            border-radius: 7px; padding: 8px 10px; font-size: 12px; font-family: inherit;
+        }
+        textarea { resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; min-height: 140px; }
+
+        button.action {
+            width: 100%; margin-top: 10px; padding: 10px; border: none; border-radius: 8px;
+            background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; cursor: pointer;
+        }
+        button.action:active { filter: brightness(.9); }
+
+        .row-item {
+            padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
+            cursor: pointer; background: var(--bg); font-size: 12px;
+        }
+        .row-item:hover { border-color: var(--accent); }
+        .row-item.active { border-color: var(--accent); background: #1d2b45; }
+        .row-item .meta { color: var(--muted); font-size: 11px; margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .badge { padding: 1px 6px; border-radius: 5px; background: var(--panel); font-weight: 600; }
+
+        .detail { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+        .detail-head {
+            padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel);
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex-shrink: 0;
+        }
+        .stat { font-size: 12px; color: var(--muted); }
+        .stat b { color: var(--text); }
+        .detail-head .spacer { flex: 1; }
+        .detail-head button {
+            padding: 6px 12px; border: 1px solid var(--border); background: var(--panel2);
+            color: var(--text); border-radius: 7px; font-size: 12px; font-weight: 600; cursor: pointer;
+        }
+
+        .split {
+            flex: 1; display: flex; flex-direction: column;
+            min-height: 0;
+        }
+        .map-wrap {
+            position: relative; min-height: 120px; flex: 1 1 55%;
+            min-width: 0;
+        }
+        #map {
+            width: 100%; height: 100%; background: #0b1220;
+            z-index: 1;
+        }
+        .split-resizer {
+            flex: 0 0 7px;
+            background: var(--border);
+            cursor: row-resize;
+            position: relative;
+            z-index: 5;
+            touch-action: none;
+        }
+        .split-resizer::after {
+            content: '';
+            position: absolute; left: 50%; top: 50%;
+            transform: translate(-50%, -50%);
+            width: 36px; height: 3px; border-radius: 2px;
+            background: #64748b;
+        }
+        .split-resizer:hover,
+        .split-resizer.dragging {
+            background: #3b82f6;
+        }
+        .split-resizer:hover::after,
+        .split-resizer.dragging::after {
+            background: #93c5fd;
+        }
+        .log-list {
+            overflow-y: auto; min-height: 100px; flex: 1 1 45%;
+            padding: 4px 0;
+        }
+        body.resizing-split { cursor: row-resize; user-select: none; }
+        body.resizing-split iframe,
+        body.resizing-split #map { pointer-events: none; }
+
+        .map-toolbar {
+            position: absolute; top: 10px; right: 10px; z-index: 1000;
+            display: flex; flex-direction: column; gap: 2px;
+            background: rgba(15, 23, 42, .94);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 12px;
+            min-width: 138px;
+            width: max-content;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+        }
+        .map-toolbar label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 0;
+            padding: 4px 0;
+            color: var(--text);
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            line-height: 1.2;
+        }
+        .map-toolbar input[type="checkbox"] {
+            flex-shrink: 0;
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: var(--accent);
+        }
+        .map-toolbar .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+
+        .log-line {
+            display: grid; grid-template-columns: 78px 70px 1fr; gap: 8px;
+            padding: 5px 14px; font-size: 12px; border-bottom: 1px solid rgba(51,65,85,.4);
+            font-family: ui-monospace, Menlo, Consolas, monospace; cursor: default;
+        }
+        .log-line.has-geo { cursor: pointer; }
+        .log-line:hover { background: var(--panel2); }
+        .log-line.active-pin {
+            background: #1e3a5f;
+            outline: 1px solid #3b82f6;
+        }
+        .log-line .t { color: var(--muted); }
+        .log-line .cat { font-weight: 700; text-transform: uppercase; font-size: 10px; padding-top: 1px; }
+        .log-line .msg { white-space: pre-wrap; word-break: break-word; }
+        .lvl-success .msg { color: #86efac; }
+        .lvl-warn .msg { color: #fcd34d; }
+        .lvl-error .msg { color: #fca5a5; }
+        .lvl-info .msg { color: var(--text); }
+        .cat-location { color: #60a5fa; } .cat-geofence { color: #38bdf8; }
+        .cat-dr { color: #c084fc; } .cat-step { color: #a78bfa; }
+        .cat-reject { color: #f87171; } .cat-filter { color: #2dd4bf; }
+        .cat-system { color: #94a3b8; }
+
+        .empty { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+        .toggle-json {
+            padding: 6px 16px; font-size: 11px; color: var(--muted); cursor: pointer;
+            border-top: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
+        }
+        pre.raw {
+            margin: 0; padding: 14px 16px; overflow: auto; font-size: 11px; background: #0b1220;
+            font-family: ui-monospace, Menlo, Consolas, monospace; color: #cbd5e1; display: none;
+            max-height: 28vh; flex-shrink: 0;
+        }
+        .hint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+        .err-box { color: #fca5a5; font-size: 12px; margin-top: 8px; }
+
+        .leaflet-popup-content { font-size: 12px; margin: 8px 10px; line-height: 1.4; }
+        .leaflet-popup-content b { color: #0f172a; }
+
+        @media (max-width: 900px) {
+            main { flex-direction: column; }
+            .side { width: 100%; max-height: 28vh; border-right: none; border-bottom: 1px solid var(--border); }
+            .map-wrap { flex-basis: 40%; }
+            .log-list { flex-basis: 60%; }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>SimpleLocate — Log Görüntüleyici</h1>
+        <span class="sub">JSON / gzip çöz · haritada pin · log listesi</span>
+        <div class="tabs">
+            <button class="tab active" data-tab="paste">Yapıştır</button>
+            <button class="tab" data-tab="supabase">Supabase</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="side">
+            <div class="pane-body" id="pane-paste">
+                <label>payload_gz (base64) veya düz JSON yapıştır</label>
+                <textarea id="pasteInput" placeholder='H4sIAAAA...  veya  { "stats": ..., "entries": [...] }'></textarea>
+                <button class="action" id="decodeBtn">Çöz &amp; Göster</button>
+                <div class="err-box" id="pasteErr"></div>
+                <p class="hint">Standart export JSON, CSV’den dönüştürülmüş dizi veya Supabase <b>payload_gz</b> yapıştırılabilir. Konumlar haritada pin olarak görünür.</p>
+            </div>
+
+            <div class="pane-body" id="pane-supabase" style="display:none">
+                <label>Supabase REST URL</label>
+                <input id="sbUrl" placeholder="https://xxxx.supabase.co/rest/v1/test_logs">
+                <label>API Key (SELECT yetkili)</label>
+                <input id="sbKey" placeholder="sb_publishable_... veya anon key">
+                <label>Etiket filtresi (opsiyonel)</label>
+                <input id="sbLabel" placeholder="magaza-A">
+                <button class="action" id="fetchBtn">Son kayıtları getir</button>
+                <div class="err-box" id="sbErr"></div>
+                <div id="rowList" style="margin-top:12px"></div>
+            </div>
+        </div>
+
+        <div class="detail">
+            <div class="detail-head" id="detailHead">
+                <span class="stat">Henüz log yüklenmedi</span>
+            </div>
+            <div class="split">
+                <div class="map-wrap">
+                    <div id="map"></div>
+                    <div class="map-toolbar" id="mapLegend">
+                        <label><input type="checkbox" data-layer="real" checked> <span class="dot" style="background:#16a34a"></span> Gerçek</label>
+                        <label><input type="checkbox" data-layer="raw" checked> <span class="dot" style="background:#3b82f6"></span> Ham GPS</label>
+                        <label><input type="checkbox" data-layer="pdr" checked> <span class="dot" style="background:#a855f7"></span> PDR / DR</label>
+                        <label><input type="checkbox" data-layer="reject" checked> <span class="dot" style="background:#ef4444"></span> Red</label>
+                        <label><input type="checkbox" data-layer="jump" checked> <span class="dot" style="background:#f59e0b"></span> Jump</label>
+                        <label><input type="checkbox" data-layer="path" checked> <span class="dot" style="background:#22d3ee;border-radius:2px"></span> Yol</label>
+                    </div>
+                </div>
+                <div class="split-resizer" id="splitResizer" title="Sürükleyerek boyutlandır"></div>
+                <div class="log-list" id="logList">
+                    <div class="empty">Sol taraftan bir log çöz veya seç — konumlar haritada pinlenir.</div>
+                </div>
+            </div>
+            <div class="toggle-json" id="toggleJson" style="display:none">▸ Ham JSON'u göster/gizle</div>
+            <pre class="raw" id="rawJson"></pre>
+        </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        var current = null;
+        var map = null;
+        var layerGroups = {};
+        var pathLine = null;
+        var pinByEntryIdx = {};
+
+        function initSplitResizer() {
+            var split = document.querySelector('.split');
+            var mapWrap = document.querySelector('.map-wrap');
+            var logList = document.getElementById('logList');
+            var handle = document.getElementById('splitResizer');
+            if (!split || !mapWrap || !logList || !handle) return;
+
+            var dragging = false;
+            var startY = 0;
+            var startMapH = 0;
+
+            function applyHeights(mapH) {
+                var total = split.clientHeight - handle.offsetHeight;
+                var minMap = 120;
+                var minLog = 100;
+                var maxMap = Math.max(minMap, total - minLog);
+                mapH = Math.max(minMap, Math.min(maxMap, mapH));
+                mapWrap.style.flex = '0 0 ' + mapH + 'px';
+                logList.style.flex = '1 1 auto';
+                if (map) map.invalidateSize({ animate: false });
+            }
+
+            function onMove(clientY) {
+                if (!dragging) return;
+                applyHeights(startMapH + (clientY - startY));
+            }
+
+            function stopDrag() {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.classList.remove('resizing-split');
+                if (map) map.invalidateSize({ animate: false });
+            }
+
+            handle.addEventListener('mousedown', function (e) {
+                e.preventDefault();
+                dragging = true;
+                startY = e.clientY;
+                startMapH = mapWrap.getBoundingClientRect().height;
+                handle.classList.add('dragging');
+                document.body.classList.add('resizing-split');
+            });
+            handle.addEventListener('touchstart', function (e) {
+                if (!e.touches || !e.touches[0]) return;
+                dragging = true;
+                startY = e.touches[0].clientY;
+                startMapH = mapWrap.getBoundingClientRect().height;
+                handle.classList.add('dragging');
+                document.body.classList.add('resizing-split');
+            }, { passive: true });
+
+            window.addEventListener('mousemove', function (e) { onMove(e.clientY); });
+            window.addEventListener('mouseup', stopDrag);
+            window.addEventListener('touchmove', function (e) {
+                if (!dragging || !e.touches || !e.touches[0]) return;
+                onMove(e.touches[0].clientY);
+            }, { passive: true });
+            window.addEventListener('touchend', stopDrag);
+            window.addEventListener('touchcancel', stopDrag);
+        }
+
+        function initMap() {
+            if (map) return;
+            map = L.map('map', { zoomControl: true, maxZoom: 22 }).setView([41.0, 29.0], 6);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 22,
+                maxNativeZoom: 19,
+                attribution: '&copy; OpenStreetMap'
+            }).addTo(map);
+            ['real', 'raw', 'pdr', 'reject', 'jump'].forEach(function (k) {
+                layerGroups[k] = L.layerGroup().addTo(map);
+            });
+            pathLine = L.polyline([], { color: '#22d3ee', weight: 3, opacity: 0.75 }).addTo(map);
+
+            document.querySelectorAll('#mapLegend input[data-layer]').forEach(function (cb) {
+                cb.addEventListener('change', function () {
+                    var key = cb.getAttribute('data-layer');
+                    if (key === 'path') {
+                        if (cb.checked) { if (!map.hasLayer(pathLine)) pathLine.addTo(map); }
+                        else { map.removeLayer(pathLine); }
+                        return;
+                    }
+                    if (!layerGroups[key]) return;
+                    if (cb.checked) layerGroups[key].addTo(map);
+                    else map.removeLayer(layerGroups[key]);
+                });
+            });
+        }
+
+        async function ungzipBase64(b64) {
+            var clean = b64.trim().replace(/\s+/g, '');
+            var bytes = Uint8Array.from(atob(clean), function (c) { return c.charCodeAt(0); });
+            var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+            return await new Response(stream).text();
+        }
+
+        function looksLikeJson(s) {
+            var t = s.trim();
+            return t.charAt(0) === '{' || t.charAt(0) === '[';
+        }
+
+        function fmtTime(t) {
+            var d = new Date(t);
+            function p(n) { return n < 10 ? '0' + n : '' + n; }
+            return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()) +
+                '.' + ('' + d.getMilliseconds()).padStart(3, '0');
+        }
+
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>]/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c];
+            });
+        }
+
+        function parseEntryData(d) {
+            if (d == null) return null;
+            if (typeof d === 'object') return d;
+            try {
+                return JSON.parse(String(d).replace(/'/g, '"'));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Hem {entries:[...]} hem düz dizi (CSV export) formatını normalize et
+        function normalizeParsed(parsed) {
+            if (Array.isArray(parsed)) {
+                return {
+                    stats: {},
+                    entries: parsed.map(function (e) {
+                        return {
+                            seq: e.seq,
+                            t: e.t != null ? e.t : Date.parse(e.time),
+                            category: e.category,
+                            level: e.level,
+                            message: e.message,
+                            data: parseEntryData(e.data)
+                        };
+                    })
+                };
+            }
+            var entries = (parsed.entries || []).map(function (e) {
+                return {
+                    seq: e.seq,
+                    t: e.t != null ? e.t : Date.parse(e.time),
+                    category: e.category,
+                    level: e.level,
+                    message: e.message,
+                    data: parseEntryData(e.data)
+                };
+            });
+            return { stats: parsed.stats || {}, entries: entries, exportedAt: parsed.exportedAt };
+        }
+
+        function classifyPoint(e) {
+            var msg = e.message || '';
+            var data = e.data || {};
+            if (e.category === 'reject' || /reddedildi/i.test(msg)) return 'reject';
+            if (e.category === 'filter' || /sıçrama|jump/i.test(msg)) return 'jump';
+            if (e.category === 'step' || data.isPDR || /DEAD RECKONING|PDR adım/i.test(msg)) return 'pdr';
+            if (/GERÇEK KONUM güncellendi|SON İYİ KONUM güncellendi/i.test(msg)) return 'real';
+            if (/Ham GPS|alan dışı/i.test(msg) || e.category === 'location') return 'raw';
+            if (data.lat != null && data.lng != null) return 'raw';
+            return null;
+        }
+
+        function pinColor(kind) {
+            return ({
+                real: '#16a34a',
+                raw: '#3b82f6',
+                pdr: '#a855f7',
+                reject: '#ef4444',
+                jump: '#f59e0b'
+            })[kind] || '#94a3b8';
+        }
+
+        function makeIcon(kind, isFirst, isLast) {
+            var c = pinColor(kind);
+            var size = (isFirst || isLast) ? 14 : 10;
+            var border = isFirst ? '#fff' : (isLast ? '#fde68a' : 'rgba(255,255,255,.85)');
+            return L.divIcon({
+                className: '',
+                iconSize: [size, size],
+                iconAnchor: [size / 2, size / 2],
+                html: '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:50%;' +
+                    'background:' + c + ';border:2px solid ' + border + ';' +
+                    'box-shadow:0 0 0 1px rgba(0,0,0,.35)"></div>'
+            });
+        }
+
+        function clearMap() {
+            Object.keys(layerGroups).forEach(function (k) { layerGroups[k].clearLayers(); });
+            if (pathLine) pathLine.setLatLngs([]);
+            pinByEntryIdx = {};
+        }
+
+        function renderMap(entries) {
+            initMap();
+            clearMap();
+
+            var bounds = [];
+            var pathPts = [];
+            var counts = { real: 0, raw: 0, pdr: 0, reject: 0, jump: 0 };
+
+            var geoEntries = [];
+            for (var i = 0; i < entries.length; i++) {
+                var e = entries[i];
+                var d = e.data || {};
+                var lat = d.lat != null ? d.lat : d.baseLat;
+                var lng = d.lng != null ? d.lng : d.baseLng;
+                if (lat == null || lng == null || !isFinite(lat) || !isFinite(lng)) continue;
+                var kind = classifyPoint(e);
+                if (!kind) kind = 'raw';
+                geoEntries.push({ idx: i, e: e, lat: +lat, lng: +lng, kind: kind });
+            }
+
+            geoEntries.forEach(function (g, gi) {
+                counts[g.kind] = (counts[g.kind] || 0) + 1;
+                var isFirst = gi === 0;
+                var isLast = gi === geoEntries.length - 1;
+                var acc = g.e.data && g.e.data.accuracy != null ? Number(g.e.data.accuracy).toFixed(1) + 'm' : '—';
+                var popup =
+                    '<b>#' + esc(g.e.seq) + ' · ' + esc(g.kind) + '</b><br>' +
+                    esc(fmtTime(g.e.t)) + '<br>' +
+                    esc((g.e.message || '').slice(0, 120)) + '<br>' +
+                    g.lat.toFixed(6) + ', ' + g.lng.toFixed(6) + '<br>' +
+                    'acc ' + acc;
+
+                var marker = L.marker([g.lat, g.lng], {
+                    icon: makeIcon(g.kind, isFirst, isLast),
+                    title: '#' + g.e.seq + ' ' + g.kind
+                }).bindPopup(popup);
+
+                marker.on('click', function () { highlightLogLine(g.idx, true); });
+                layerGroups[g.kind].addLayer(marker);
+                pinByEntryIdx[g.idx] = marker;
+                bounds.push([g.lat, g.lng]);
+
+                if (g.kind === 'real' || g.kind === 'pdr') {
+                    pathPts.push([g.lat, g.lng]);
+                }
+            });
+
+            if (pathPts.length >= 2) pathLine.setLatLngs(pathPts);
+
+            if (bounds.length) {
+                map.fitBounds(bounds, { padding: [36, 36], maxZoom: 18 });
+            }
+
+            setTimeout(function () { map.invalidateSize(); }, 50);
+            return { pinCount: geoEntries.length, counts: counts };
+        }
+
+        function highlightLogLine(idx, fromMap) {
+            var lines = document.querySelectorAll('#logList .log-line');
+            lines.forEach(function (el) { el.classList.remove('active-pin'); });
+            var el = document.querySelector('#logList .log-line[data-idx="' + idx + '"]');
+            if (el) {
+                el.classList.add('active-pin');
+                el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            }
+            if (!fromMap && pinByEntryIdx[idx]) {
+                var m = pinByEntryIdx[idx];
+                map.panTo(m.getLatLng());
+                m.openPopup();
+            }
+        }
+
+        function renderLog(parsedIn, meta) {
+            var parsed = normalizeParsed(parsedIn);
+            current = { parsed: parsed, meta: meta };
+            var stats = parsed.stats || {};
+            var entries = parsed.entries || [];
+
+            var mapInfo = renderMap(entries);
+
+            var head = document.getElementById('detailHead');
+            var bits = [];
+            if (meta && meta.label) bits.push('<span class="stat">Etiket: <b>' + esc(meta.label) + '</b></span>');
+            if (meta && meta.platform) bits.push('<span class="stat">Platform: <b>' + esc(meta.platform) + '</b></span>');
+            if (meta && meta.created_at) bits.push('<span class="stat">' + esc(new Date(meta.created_at).toLocaleString()) + '</span>');
+            bits.push('<span class="stat">Olay: <b>' + entries.length + '</b></span>');
+            bits.push('<span class="stat">Pin: <b>' + mapInfo.pinCount + '</b></span>');
+            if (stats.rawFixes != null) bits.push('<span class="stat">Ham: <b>' + stats.rawFixes + '</b></span>');
+            if (stats.rejected != null) bits.push('<span class="stat">Red: <b>' + stats.rejected + '</b></span>');
+            if (stats.jumps != null) bits.push('<span class="stat">Jump: <b>' + stats.jumps + '</b></span>');
+            if (stats.pdrSteps != null) bits.push('<span class="stat">PDR: <b>' + stats.pdrSteps + '</b></span>');
+            bits.push('<span class="spacer"></span>');
+            bits.push('<button id="fitBtn">⌖ Sığdır</button>');
+            bits.push('<button id="dlBtn">⬇ JSON indir</button>');
+            head.innerHTML = bits.join(' ');
+            document.getElementById('dlBtn').onclick = downloadCurrent;
+            document.getElementById('fitBtn').onclick = function () {
+                var b = [];
+                Object.keys(pinByEntryIdx).forEach(function (k) {
+                    var ll = pinByEntryIdx[k].getLatLng();
+                    b.push([ll.lat, ll.lng]);
+                });
+                if (b.length) map.fitBounds(b, { padding: [36, 36], maxZoom: 18 });
+            };
+
+            var list = document.getElementById('logList');
+            if (!entries.length) {
+                list.innerHTML = '<div class="empty">Bu kayıtta olay yok.</div>';
+            } else {
+                var html = '';
+                for (var i = 0; i < entries.length; i++) {
+                    var e = entries[i];
+                    var hasGeo = !!(e.data && (e.data.lat != null || e.data.baseLat != null));
+                    html += '<div class="log-line lvl-' + esc(e.level) + (hasGeo ? ' has-geo' : '') + '" data-idx="' + i + '">' +
+                        '<span class="t">' + esc(fmtTime(e.t)) + '</span>' +
+                        '<span class="cat cat-' + esc(e.category) + '">' + esc(e.category) + '</span>' +
+                        '<span class="msg">' + esc(e.message) + '</span>' +
+                        '</div>';
+                }
+                list.innerHTML = html;
+                list.querySelectorAll('.log-line.has-geo').forEach(function (el) {
+                    el.addEventListener('click', function () {
+                        highlightLogLine(+el.getAttribute('data-idx'), false);
+                    });
+                });
+            }
+
+            document.getElementById('toggleJson').style.display = 'block';
+            document.getElementById('rawJson').textContent = JSON.stringify(parsed, null, 2);
+        }
+
+        function downloadCurrent() {
+            if (!current) return;
+            var name = 'locate-log' + (current.meta && current.meta.session_id ? '-' + current.meta.session_id : '') + '.json';
+            var blob = new Blob([JSON.stringify(current.parsed, null, 2)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url; a.download = name;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
+        }
+
+        document.getElementById('decodeBtn').onclick = async function () {
+            var raw = document.getElementById('pasteInput').value;
+            var errEl = document.getElementById('pasteErr');
+            errEl.textContent = '';
+            if (!raw.trim()) { errEl.textContent = 'Önce bir şey yapıştır.'; return; }
+            try {
+                var jsonText = looksLikeJson(raw) ? raw : await ungzipBase64(raw);
+                var parsed = JSON.parse(jsonText);
+                renderLog(parsed, null);
+            } catch (e) {
+                errEl.textContent = 'Çözülemedi: ' + (e && e.message ? e.message : e);
+            }
+        };
+
+        document.getElementById('fetchBtn').onclick = async function () {
+            var url = document.getElementById('sbUrl').value.trim();
+            var key = document.getElementById('sbKey').value.trim();
+            var label = document.getElementById('sbLabel').value.trim();
+            var errEl = document.getElementById('sbErr');
+            var listEl = document.getElementById('rowList');
+            errEl.textContent = ''; listEl.innerHTML = '';
+            if (!url || !key) { errEl.textContent = 'URL ve key gerekli.'; return; }
+
+            var q = url + '?select=id,created_at,session_id,label,platform,reason,entry_count,duration_ms,compressed,stats,payload_gz,payload' +
+                '&order=created_at.desc&limit=50';
+            if (label) q += '&label=eq.' + encodeURIComponent(label);
+            try {
+                var res = await fetch(q, { headers: { apikey: key, Authorization: 'Bearer ' + key } });
+                if (!res.ok) {
+                    errEl.textContent = 'HTTP ' + res.status + ' — SELECT izni yok olabilir.';
+                    return;
+                }
+                var rows = await res.json();
+                if (!rows.length) { listEl.innerHTML = '<div class="empty">Kayıt yok.</div>'; return; }
+                var html = '';
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i];
+                    html += '<div class="row-item" data-idx="' + i + '">' +
+                        '<div><b>' + esc(r.label || '(etiketsiz)') + '</b> · ' + esc(r.platform || '?') + '</div>' +
+                        '<div class="meta">' +
+                        '<span class="badge">' + (r.entry_count || 0) + ' olay</span>' +
+                        '<span>' + esc(new Date(r.created_at).toLocaleString()) + '</span>' +
+                        '<span>' + esc(r.reason || '') + '</span>' +
+                        '</div></div>';
+                }
+                listEl.innerHTML = html;
+                var items = listEl.querySelectorAll('.row-item');
+                items.forEach(function (el) {
+                    el.onclick = async function () {
+                        items.forEach(function (x) { x.classList.remove('active'); });
+                        el.classList.add('active');
+                        var r = rows[+el.dataset.idx];
+                        try {
+                            var jsonText = r.compressed && r.payload_gz ? await ungzipBase64(r.payload_gz) : r.payload;
+                            var parsed = JSON.parse(jsonText);
+                            renderLog(parsed, r);
+                        } catch (e) {
+                            document.getElementById('logList').innerHTML =
+                                '<div class="empty">Çözülemedi: ' + esc(e.message) + '</div>';
+                        }
+                    };
+                });
+            } catch (e) {
+                errEl.textContent = 'Ağ hatası: ' + (e && e.message ? e.message : e);
+            }
+        };
+
+        document.querySelectorAll('.tab').forEach(function (tab) {
+            tab.onclick = function () {
+                document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+                tab.classList.add('active');
+                var which = tab.dataset.tab;
+                document.getElementById('pane-paste').style.display = which === 'paste' ? 'block' : 'none';
+                document.getElementById('pane-supabase').style.display = which === 'supabase' ? 'block' : 'none';
+            };
+        });
+
+        document.getElementById('toggleJson').onclick = function () {
+            var pre = document.getElementById('rawJson');
+            pre.style.display = pre.style.display === 'block' ? 'none' : 'block';
+        };
+
+        initMap();
+        initSplitResizer();
+    </script>
+</body>
+
+</html>

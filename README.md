@@ -91,7 +91,7 @@ Gelen her `locationfound` event'i şu sırayla işlenir:
 
 1. **Accuracy kontrolü** — `maxAcceptableAccuracy` (varsayılan 100m) üstü reddedilir
 2. **Geofence kontrolü** — Polygon/bounds/radius bazlı alan sınırı. Dışındaki konumlar reddedilir veya PDR'a geçilir
-3. **Hız kontrolü** — `maxHumanSpeed` (5 m/s) ve `maxIndoorSpeed` (3 m/s) üstü reddedilir
+3. **Hız kontrolü** — `maxHumanSpeed` (5 m/s) ve `maxIndoorSpeed` (6 m/s) üstü reddedilir
 4. **Sıçrama tespiti** — Ardışık konumlar arası mesafe `jumpThreshold`'u aşarsa filtrelenir
 5. **Median filtre** — Son N konumun medyanı alınır (iç mekan: 7, dış mekan: 3 pencere)
 6. **Kalman filtresi** — Tahmin-düzeltme döngüsü ile konum yumuşatma
@@ -181,12 +181,18 @@ Ek korumalar:
 | Parametre | Varsayılan | Açıklama |
 |-----------|-----------|----------|
 | `indoorMode` | `true` | İç mekan modu |
-| `indoorMedianWindowSize` | `7` | İç mekan median penceresi |
-| `indoorKalmanR` | `0.5` | İç mekan Kalman R değeri |
-| `indoorLowPassTau` | `1.0` | İç mekan low-pass tau |
-| `maxIndoorSpeed` | `3` | İç mekan maks hız (m/s) |
+| `indoorMedianWindowSize` | `3` | İç mekan median tabanı (yürürken ≤3) |
+| `indoorKalmanR` | `0.25` | İç mekan Kalman R tabanı |
+| `indoorLowPassTau` | `0.4` | İç mekan low-pass tau |
+| `maxIndoorSpeed` | `6` | İç mekan maks hız (m/s) |
 | `enableLastGoodLocation` | `true` | Son iyi konum fallback |
 | `lastGoodLocationTimeout` | `30000` | Son iyi konum timeout (ms) |
+| `coldStartGate` | `true` | Açılışta tutarlı fix bekle |
+| `coldStartMaxAccuracy` | `35` | Açılışta maks accuracy (m) |
+| `coldStartMinFixes` | `3` | Açılış için min tutarlı fix |
+| `coldStartConsistentDistance` | `45` | Adaylar arası maks mesafe (m) |
+| `coldStartLastGoodDelayMs` | `8000` | Last-good yazmayı ertele (ms) |
+| `coldStartTimeoutMs` | `20000` | Açılış kapısı zaman aşımı (ms) |
 
 ### Geofence
 
