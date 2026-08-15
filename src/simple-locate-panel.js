@@ -505,6 +505,8 @@
         'reanchorOverrideFixes', 'reanchorOverrideSpanMs', 'reanchorMaxSpeed',
         'displayJumpMaxDistance', 'clampDisplayJump', 'geoidUndulation',
         'pdrStepLength', 'pdrStepThreshold', 'lowPassFilterTau',
+        'indoorLowPassTau', 'indoorKalmanR', 'indoorMedianWindowSize',
+        'enableLowPassFilter', 'experimentalFusion',
         'medianWindowSize', 'kalmanProcessNoise', 'kalmanMeasurementNoise'
     ];
 

@@ -132,6 +132,7 @@
         var currentFix = null;
         var SimpleLocate = Lref.Control.SimpleLocate;
 
+        var userOpts = opts.controlOptions || {};
         var ctrl = new SimpleLocate(Object.assign({
             geofencePolygon: opts.polygon || null,
             enableGeofence: !!opts.polygon,
@@ -139,7 +140,11 @@
             enableDeadReckoning: false,
             enableAltitude: false,
             drawCircle: false,
+            controlPanel: false
+        }, userOpts, {
+            enableDeadReckoning: false,
             controlPanel: false,
+            drawCircle: false,
             afterDeviceMove: function (payload) {
                 events.push({
                     fixSeq: currentFix ? currentFix.seq : null,
@@ -158,7 +163,7 @@
                     displayJump: payload.displayJump || null
                 });
             }
-        }, opts.controlOptions || {}));
+        }));
 
         ctrl._map = stubMap();
         if (opts.isIOS != null) ctrl._isIOS = !!opts.isIOS;
@@ -325,7 +330,213 @@
             },
             worstStale: worstStale,
             topDisplayJumps: jumps.slice(0, 5),
-            displayed: displayed
+            displayed: displayed,
+            lag: measureLag(displayed, fixes, { matchSeq: true })
+        };
+    }
+
+    function meanArr(arr) {
+        if (!arr.length) return null;
+        var s = 0;
+        for (var i = 0; i < arr.length; i++) s += arr[i];
+        return s / arr.length;
+    }
+
+    function percentileArr(arr, p) {
+        if (!arr.length) return null;
+        var a = arr.slice().sort(function (x, y) { return x - y; });
+        var i = Math.min(a.length - 1, Math.max(0, Math.round((a.length - 1) * p)));
+        return a[i];
+    }
+
+    /**
+     * “Arkadan geliyor / durunca yetişiyor” ölçümü.
+     *
+     * displayed: {t, lat, lng, fixSeq?, panel?, kind?}[]
+     * Ham GPS yürürken gösterim gerideyse meanMovingM yükselir.
+     * Yürüme→duruştan sonra 3 m içine girene kadar geçen süre catchupMedianSec.
+     */
+    function measureLag(displayed, fixes, opts) {
+        opts = opts || {};
+        var empty = {
+            meanMovingM: null, p90MovingM: null, maxMovingM: null,
+            meanStoppedM: null, catchupMedianSec: null, catchupN: 0,
+            catchupTimeoutN: 0, gapAfter3M: null, gapAtStopM: null,
+            samplesMoving: 0, samplesStopped: 0, lagTicks: []
+        };
+        if (!displayed || !displayed.length || !fixes || !fixes.length) return empty;
+
+        var rawBySeq = {};
+        for (var i = 0; i < fixes.length; i++) {
+            var sp = null;
+            if (i > 0) {
+                var dt = (fixes[i].t - fixes[i - 1].t) / 1000;
+                if (dt > 0.05 && dt < 10) {
+                    sp = haversine(
+                        fixes[i - 1].latitude, fixes[i - 1].longitude,
+                        fixes[i].latitude, fixes[i].longitude
+                    ) / dt;
+                }
+            }
+            fixes[i]._speed = sp;
+            if (fixes[i].seq != null) rawBySeq[fixes[i].seq] = i;
+        }
+
+        function rawAt(t, seq) {
+            if (opts.matchSeq !== false && seq != null && rawBySeq[seq] != null) {
+                return fixes[rawBySeq[seq]];
+            }
+            var lo = 0, hi = fixes.length - 1, ans = 0;
+            while (lo <= hi) {
+                var mid = (lo + hi) >> 1;
+                if (fixes[mid].t <= t) { ans = mid; lo = mid + 1; }
+                else hi = mid - 1;
+            }
+            return fixes[ans];
+        }
+
+        var moving = [];
+        var stopped = [];
+        var ticks = [];
+        var tickEvery = Math.max(1, Math.floor(displayed.length / 36));
+
+        for (var d = 0; d < displayed.length; d++) {
+            var p = displayed[d];
+            if (p.lat == null || p.lng == null) continue;
+            var kind = p.panel || p.kind;
+            var isHold = kind === 'fallback' || kind === 'pdr' || kind === 'reject';
+            var raw = rawAt(p.t, p.fixSeq);
+            if (!raw) continue;
+            var off = haversine(p.lat, p.lng, raw.latitude, raw.longitude);
+            var spd = raw._speed;
+            var isMoving = spd != null && spd >= 0.7;
+            var isStopped = spd != null && spd < 0.35;
+            if (!isHold && isMoving) {
+                moving.push(off);
+                if (d % tickEvery === 0 && off > 2.5) {
+                    ticks.push({
+                        from: [p.lat, p.lng],
+                        to: [raw.latitude, raw.longitude],
+                        offset: off
+                    });
+                }
+            } else if (!isHold && isStopped) {
+                stopped.push(off);
+            }
+        }
+
+        function dispAt(t) {
+            var best = null;
+            for (var di = 0; di < displayed.length; di++) {
+                var dx = displayed[di];
+                if (dx.lat == null) continue;
+                if (dx.t <= t) best = dx;
+                else break;
+            }
+            return best;
+        }
+
+        // Gerçek duruş: önce net yer değişimi (zikzak GPS sayılmaz), sonra 2.5 sn hareketsizlik.
+        var stops = [];
+        var ni = 0;
+        while (ni < fixes.length - 4) {
+            var walkEnd = ni;
+            while (walkEnd < fixes.length && (fixes[walkEnd].t - fixes[ni].t) < 10000) walkEnd++;
+            walkEnd = Math.max(ni + 2, walkEnd - 1);
+            var pathLen = 0;
+            for (var w = ni + 1; w <= walkEnd; w++) {
+                pathLen += haversine(
+                    fixes[w - 1].latitude, fixes[w - 1].longitude,
+                    fixes[w].latitude, fixes[w].longitude
+                );
+            }
+            var net = haversine(
+                fixes[ni].latitude, fixes[ni].longitude,
+                fixes[walkEnd].latitude, fixes[walkEnd].longitude
+            );
+            var isWalk = net >= 10 && pathLen > 0 && (net / pathLen) >= 0.4;
+            if (!isWalk) { ni++; continue; }
+
+            var foundStop = false;
+            var k = walkEnd;
+            while (k < fixes.length && (fixes[k].t - fixes[walkEnd].t) < 8000) {
+                var k2 = k;
+                while (k2 < fixes.length && (fixes[k2].t - fixes[k].t) < 2500) k2++;
+                if (k2 - k >= 2) {
+                    var qNet = haversine(
+                        fixes[k].latitude, fixes[k].longitude,
+                        fixes[k2 - 1].latitude, fixes[k2 - 1].longitude
+                    );
+                    var maxSp = 0;
+                    for (var u = k + 1; u < k2; u++) {
+                        if (fixes[u]._speed != null) maxSp = Math.max(maxSp, fixes[u]._speed);
+                    }
+                    if (qNet < 5 && maxSp < 0.6) {
+                        var slat = 0, slng = 0, cnt = 0;
+                        for (var c = k; c < k2; c++) {
+                            slat += fixes[c].latitude;
+                            slng += fixes[c].longitude;
+                            cnt++;
+                        }
+                        stops.push({
+                            t: fixes[k].t,
+                            lat: slat / cnt,
+                            lng: slng / cnt
+                        });
+                        ni = k2;
+                        foundStop = true;
+                        break;
+                    }
+                }
+                k++;
+            }
+            if (!foundStop) ni = walkEnd;
+        }
+
+        var catchups = [];
+        var timeouts = 0;
+        var gap3s = [];
+        var gap0s = [];
+        for (var s = 0; s < stops.length; s++) {
+            var stop = stops[s];
+            var at0 = dispAt(stop.t);
+            if (!at0) continue;
+            var gap0 = haversine(at0.lat, at0.lng, stop.lat, stop.lng);
+            // Zaten oradaysa bu "arkadan yetişme" değil, atla
+            if (gap0 < 6) continue;
+            gap0s.push(gap0);
+            var target = Math.max(5, Math.min(10, gap0 * 0.4));
+            var tHit = null;
+            var gap3 = gap0;
+            for (var q = 0; q < displayed.length; q++) {
+                var dp = displayed[q];
+                if (dp.lat == null || dp.t < stop.t) continue;
+                var g = haversine(dp.lat, dp.lng, stop.lat, stop.lng);
+                if (dp.t - stop.t <= 3000) gap3 = g;
+                if (g <= target) {
+                    tHit = (dp.t - stop.t) / 1000;
+                    break;
+                }
+                if (dp.t - stop.t > 15000) break;
+            }
+            gap3s.push(gap3);
+            if (tHit == null) timeouts++;
+            else catchups.push(tHit);
+        }
+
+        return {
+            meanMovingM: meanArr(moving),
+            p90MovingM: percentileArr(moving, 0.9),
+            maxMovingM: moving.length ? Math.max.apply(null, moving) : null,
+            meanStoppedM: meanArr(stopped),
+            catchupMedianSec: percentileArr(catchups, 0.5),
+            catchupN: catchups.length + timeouts,
+            catchupTimeoutN: timeouts,
+            gapAfter3M: meanArr(gap3s),
+            gapAtStopM: meanArr(gap0s),
+            samplesMoving: moving.length,
+            samplesStopped: stopped.length,
+            lagTicks: ticks
         };
     }
 
@@ -406,6 +617,7 @@
         derivePolygonFromLog: derivePolygonFromLog,
         replay: replay,
         analyze: analyze,
-        extractOriginalPath: extractOriginalPath
+        extractOriginalPath: extractOriginalPath,
+        measureLag: measureLag
     };
 })(typeof window !== 'undefined' ? window : this);

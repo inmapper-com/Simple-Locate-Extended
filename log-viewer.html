@@ -69,6 +69,33 @@
             background: var(--accent); color: #fff; font-size: 13px; font-weight: 700; cursor: pointer;
         }
         button.action:active { filter: brightness(.9); }
+        .sim-presets { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+        .sim-presets button {
+            flex: 1 1 calc(50% - 6px);
+            padding: 6px 8px; font-size: 11px; font-weight: 700;
+            border-radius: 7px; border: 1px solid var(--border);
+            background: var(--bg); color: var(--text); cursor: pointer;
+        }
+        .sim-presets button:hover { border-color: var(--accent); }
+        .sim-presets button.active { border-color: var(--accent); background: #1d2b45; color: #fff; }
+        .cfg-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 8px;
+        }
+        .cfg-grid label { margin: 0; }
+        .cfg-check {
+            display: flex; align-items: center; gap: 8px;
+            color: var(--text); font-weight: 600; cursor: pointer; margin-top: 8px;
+        }
+        .cfg-check input { width: 14px; height: 14px; margin: 0; flex-shrink: 0; }
+        .sim-verdict {
+            margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+            border: 1px solid var(--border); font-size: 12.5px; line-height: 1.5;
+        }
+        .sim-verdict b { font-size: 13px; }
+        .sim-verdict.win { background: #052e16; border-color: #166534; }
+        .sim-verdict.mix { background: #1c1917; border-color: #a16207; }
+        .sim-verdict.lose { background: #450a0a; border-color: #7f1d1d; }
+        .sim-verdict.same { background: #0b1220; }
 
         .row-item {
             padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
@@ -294,11 +321,34 @@
             </div>
 
             <div class="pane-body" id="pane-sim" style="display:none">
-                <p class="hint" style="margin-top:0">Yüklenen logun ham GPS’i <b>şu an yüklü eklenti</b> ile yeniden oynatılır. Orijinal yol (kayıt) ile simülasyon yolunu karşılaştırırsın — filtre değişikliğinin etkisini sahaya çıkmadan görürsün.</p>
-                <button class="action" id="simBtn">▶ Simüle et (güncel eklenti)</button>
+                <p class="hint" style="margin-top:0">Aynı logun ham GPS’i aşağıdaki ayarlarla yeniden oynatılır. <b>Cyan</b> = kayıtta gördüğün yol, <b>turuncu</b> = bu ayarlar. Kesikli çizgiler: gösterim ham GPS’in ne kadar gerisinde (uzun = arkadan takip).</p>
+                <div class="sim-presets">
+                    <button type="button" data-preset="app">Varsayılan</button>
+                    <button type="button" data-preset="record">Kayıttan</button>
+                    <button type="button" data-preset="lag">Az lag</button>
+                    <button type="button" data-preset="fusion">Füzyon</button>
+                </div>
+                <div class="cfg-grid">
+                    <label>Low-pass tau (sn)
+                        <input id="simTau" type="number" min="0.1" max="3" step="0.1" value="0.4">
+                    </label>
+                    <label>Kalman R
+                        <input id="simR" type="number" min="0.05" max="2" step="0.05" value="0.25">
+                    </label>
+                    <label>Kalman Q
+                        <input id="simQ" type="number" min="0.01" max="0.5" step="0.01" value="0.05">
+                    </label>
+                    <label>Median pencere
+                        <input id="simMedian" type="number" min="1" max="9" step="1" value="3">
+                    </label>
+                </div>
+                <label class="cfg-check"><input type="checkbox" id="simLpf" checked> Low-pass açık</label>
+                <label class="cfg-check"><input type="checkbox" id="simFusion"> experimentalFusion (hız modeli)</label>
+                <label class="cfg-check"><input type="checkbox" id="simClamp" checked> Ekran sıçrama sınırı</label>
+                <button class="action" id="simBtn">▶ Simüle et</button>
                 <div class="err-box" id="simErr"></div>
                 <div id="simResult"></div>
-                <p class="hint">PDR/ivmeölçer replay edilmez. Geofence, logdaki içeride/dışarıda işaretlerinden türetilir.</p>
+                <p class="hint">PDR/ivmeölçer replay edilmez. Yeşil hücre = lag / yetişme daha iyi. Dururken titreme ve max sıçrama artarsa konum daha sinirli demektir.</p>
                 <div class="sep" style="height:1px;background:var(--border);margin:14px 0"></div>
                 <label>Seçili pin göstergesi</label>
                 <p class="hint" style="margin-top:0">Pin seçilince test sırasında görünen konum noktası + accuracy çemberi çizilir. Varsayılanlar app.html ile aynı; burada değiştirebilirsin.</p>
@@ -332,6 +382,7 @@
                         <label><input type="checkbox" data-layer="jump" checked> <span class="dot" style="background:#f59e0b"></span> Jump</label>
                         <label><input type="checkbox" data-layer="path" checked> <span class="dot" style="background:#22d3ee;border-radius:2px"></span> Yol</label>
                         <label><input type="checkbox" data-layer="sim" checked> <span class="dot" style="background:#f97316;border-radius:2px"></span> Simülasyon</label>
+                        <label><input type="checkbox" data-layer="lag" checked> <span class="dot" style="background:#fde047;border-radius:2px"></span> Lag çizgileri</label>
                         <label><input type="checkbox" id="showIstPlan"> <span class="dot" style="background:#f472b6;border-radius:2px"></span> IST kat planı</label>
                         <label id="istFloorWrap" style="display:none;margin-top:4px">
                             <span style="font-size:10px;color:var(--muted);min-width:28px">Kat</span>
@@ -350,9 +401,9 @@
     </main>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="src/low-pass-filter.js?v=20260814b"></script>
-    <script src="src/leaflet-simple-locate.js?v=20260814b"></script>
-    <script src="src/simple-locate-replay.js?v=20260814b"></script>
+    <script src="src/low-pass-filter.js?v=20260815a"></script>
+    <script src="src/leaflet-simple-locate.js?v=20260815a"></script>
+    <script src="src/simple-locate-replay.js?v=20260815b"></script>
     <script src="demo/plans/ist-floorplans.js"></script>
     <script>
         var current = null;
@@ -486,6 +537,7 @@
             }).addTo(map);
             simPathLine = L.polyline([], { color: '#f97316', weight: 3, opacity: 0.85 }).addTo(map);
             layerGroups.sim = L.layerGroup().addTo(map);
+            layerGroups.lag = L.layerGroup().addTo(map);
             previewGroup = L.layerGroup().addTo(map);
 
             if (istFloorPlans) {
@@ -524,6 +576,12 @@
                             map.removeLayer(pathLine);
                             map.removeLayer(jumpLine);
                         }
+                        return;
+                    }
+                    if (key === 'lag') {
+                        if (!layerGroups.lag) return;
+                        if (cb.checked) layerGroups.lag.addTo(map);
+                        else map.removeLayer(layerGroups.lag);
                         return;
                     }
                     if (key === 'sim') {
@@ -976,6 +1034,118 @@
             return better ? 'better' : 'worse';
         }
 
+        var SIM_DEFAULTS = {
+            enableLowPassFilter: true,
+            indoorLowPassTau: 0.4,
+            indoorKalmanR: 0.25,
+            kalmanProcessNoise: 0.05,
+            indoorMedianWindowSize: 3,
+            experimentalFusion: false,
+            clampDisplayJump: true
+        };
+
+        function recordedSimFilters() {
+            var f = current && current.parsed && current.parsed.session && current.parsed.session.filters;
+            if (!f) return null;
+            return {
+                enableLowPassFilter: f.enableLowPassFilter != null ? !!f.enableLowPassFilter : true,
+                indoorLowPassTau: f.indoorLowPassTau != null ? +f.indoorLowPassTau
+                    : (f.lowPassFilterTau != null ? +f.lowPassFilterTau : SIM_DEFAULTS.indoorLowPassTau),
+                indoorKalmanR: f.indoorKalmanR != null ? +f.indoorKalmanR : SIM_DEFAULTS.indoorKalmanR,
+                kalmanProcessNoise: f.kalmanProcessNoise != null ? +f.kalmanProcessNoise : SIM_DEFAULTS.kalmanProcessNoise,
+                indoorMedianWindowSize: f.indoorMedianWindowSize != null ? +f.indoorMedianWindowSize
+                    : (f.medianWindowSize != null ? +f.medianWindowSize : 3),
+                experimentalFusion: !!f.experimentalFusion,
+                clampDisplayJump: f.clampDisplayJump != null ? !!f.clampDisplayJump : true
+            };
+        }
+
+        function applySimFilters(cfg) {
+            document.getElementById('simTau').value = cfg.indoorLowPassTau;
+            document.getElementById('simR').value = cfg.indoorKalmanR;
+            document.getElementById('simQ').value = cfg.kalmanProcessNoise;
+            document.getElementById('simMedian').value = cfg.indoorMedianWindowSize;
+            document.getElementById('simLpf').checked = cfg.enableLowPassFilter !== false;
+            document.getElementById('simFusion').checked = !!cfg.experimentalFusion;
+            document.getElementById('simClamp').checked = cfg.clampDisplayJump !== false;
+            saveSimFilters();
+        }
+
+        function readSimFilters() {
+            return {
+                enableLowPassFilter: document.getElementById('simLpf').checked,
+                indoorLowPassTau: parseFloat(document.getElementById('simTau').value) || 0.4,
+                indoorKalmanR: parseFloat(document.getElementById('simR').value) || 0.25,
+                kalmanProcessNoise: parseFloat(document.getElementById('simQ').value) || 0.05,
+                indoorMedianWindowSize: parseInt(document.getElementById('simMedian').value, 10) || 3,
+                medianWindowSize: parseInt(document.getElementById('simMedian').value, 10) || 3,
+                experimentalFusion: document.getElementById('simFusion').checked,
+                clampDisplayJump: document.getElementById('simClamp').checked,
+                indoorMode: true
+            };
+        }
+
+        function saveSimFilters() {
+            try {
+                localStorage.setItem('sl-viewer-sim-filters', JSON.stringify(readSimFilters()));
+            } catch (e) {}
+        }
+
+        function loadSimFilters() {
+            try {
+                var s = localStorage.getItem('sl-viewer-sim-filters');
+                if (s) applySimFilters(JSON.parse(s));
+            } catch (e) {}
+        }
+
+        function lagVerdict(origLag, simLag, origJump, simJump) {
+            var a = origLag.meanMovingM, b = simLag.meanMovingM;
+            var ca = origLag.gapAfter3M, cb = simLag.gapAfter3M;
+            var lagWin = a != null && b != null && b < a - 0.4;
+            var lagLose = a != null && b != null && b > a + 0.4;
+            var catchWin = ca != null && cb != null && cb < ca - 0.6;
+            var catchLose = ca != null && cb != null && cb > ca + 0.6;
+            var jumpWorse = origJump != null && simJump != null && simJump > origJump + 5;
+            var jitterWorse = origLag.meanStoppedM != null && simLag.meanStoppedM != null &&
+                simLag.meanStoppedM > origLag.meanStoppedM + 0.6;
+            var cls = 'same';
+            var title = 'Yürüyüş gecikmesi neredeyse aynı.';
+            if (lagWin && !jumpWorse && !jitterWorse) {
+                cls = 'win';
+                title = 'Evet — arkadan takip azalmış.';
+            } else if (lagWin && (jumpWorse || jitterWorse)) {
+                cls = 'mix';
+                title = 'Lag azaldı ama konum daha sinirli / zıplıyor.';
+            } else if (lagLose || catchLose) {
+                cls = 'lose';
+                title = 'Bu ayarlar sorunu kötüleştirdi.';
+            } else if (catchWin && !lagLose) {
+                cls = 'win';
+                title = 'Durunca yetişme hızlandı.';
+            }
+            var lines = [
+                'Yürürken geride kalma: ' + fmtNum(a, 1) + ' m → ' + fmtNum(b, 1) + ' m' +
+                    (lagWin ? ' (daha yakın)' : (lagLose ? ' (daha geride)' : '')),
+                'Durduktan 3 sn sonra gerilik: ' + fmtNum(ca, 1) + ' m → ' + fmtNum(cb, 1) + ' m' +
+                    (catchWin ? ' (daha çabuk yetişiyor)' : (catchLose ? ' (daha yavaş yetişiyor)' : ''))
+            ];
+            if (jumpWorse) lines.push('Dikkat: max sıçrama ' + fmtNum(origJump, 1) + ' → ' + fmtNum(simJump, 1) + ' m.');
+            if (jitterWorse) lines.push('Dikkat: dururken titreme arttı ' +
+                fmtNum(origLag.meanStoppedM, 1) + ' → ' + fmtNum(simLag.meanStoppedM, 1) + ' m.');
+            return { cls: cls, html: '<div class="sim-verdict ' + cls + '"><b>' + title + '</b><br>' +
+                lines.join('<br>') + '</div>' };
+        }
+
+        function drawLagTicks(ticks, color) {
+            if (!layerGroups.lag || !ticks) return;
+            for (var i = 0; i < ticks.length; i++) {
+                var tk = ticks[i];
+                L.polyline([tk.from, tk.to], {
+                    color: color, weight: 2, opacity: 0.75, dashArray: '2,6', interactive: false
+                }).addTo(layerGroups.lag);
+            }
+        }
+
         function runSimulation() {
             var errEl = document.getElementById('simErr');
             var outEl = document.getElementById('simResult');
@@ -989,6 +1159,7 @@
                 return;
             }
             try {
+                saveSimFilters();
                 var log = current.parsed;
                 var fixes = Replay.extractRawFixes(log);
                 if (!fixes.length) {
@@ -999,11 +1170,18 @@
                 var plat = (current.meta && current.meta.platform) ||
                     (log.session && log.session.device && log.session.device.platform) || '';
                 var isIOS = String(plat).toLowerCase() === 'ios';
-                var result = Replay.replay(fixes, { polygon: polygon, isIOS: isIOS, geoFromLog: true });
+                var controlOptions = readSimFilters();
+                var result = Replay.replay(fixes, {
+                    polygon: polygon, isIOS: isIOS, geoFromLog: true,
+                    controlOptions: controlOptions
+                });
                 var sim = Replay.analyze(fixes, result.events);
                 var orig = Replay.extractOriginalPath(log);
+                var origLag = Replay.measureLag(orig.path, fixes, { matchSeq: false });
+                var simLag = sim.lag || Replay.measureLag(sim.displayed, fixes, { matchSeq: true });
 
                 if (layerGroups.sim) layerGroups.sim.clearLayers();
+                if (layerGroups.lag) layerGroups.lag.clearLayers();
                 var simLatLngs = [];
                 for (var i = 0; i < sim.displayed.length; i++) {
                     var p = sim.displayed[i];
@@ -1023,24 +1201,31 @@
                         fillOpacity: 0.3, weight: 2, interactive: false
                     }).bindTooltip('reanchor seq ' + ra.fixSeq, { permanent: false }).addTo(layerGroups.sim);
                 }
+                drawLagTicks(origLag.lagTicks, '#22d3ee');
+                drawLagTicks(simLag.lagTicks, '#f97316');
 
                 function row(label, ov, sv, lowerBetter, digits) {
                     return '<tr><td>' + label + '</td><td>' + fmtNum(ov, digits) + '</td>' +
                         '<td class="' + cmpClass(ov, sv, lowerBetter) + '">' + fmtNum(sv, digits) + '</td></tr>';
                 }
+                var verdict = lagVerdict(origLag, simLag, orig.maxJump, sim.bigJumps.maxDist);
                 outEl.innerHTML =
-                    '<table class="sim-table"><thead><tr><th></th><th>Orijinal log</th><th>Güncel eklenti</th></tr></thead><tbody>' +
-                    row('Ham GPS', fixes.length, fixes.length, false, 0) +
-                    row('İlk gerçek (sn)', orig.firstRealAfterSec, sim.firstRealAfterSec, true, 1) +
-                    row('Gösterilen nokta', orig.path.length, sim.displayed.length, false, 0) +
-                    row('Yeniden çıpa', orig.reanchors, sim.reanchors.length, true, 0) +
+                    verdict.html +
+                    '<table class="sim-table"><thead><tr><th></th><th>Kayıt (cyan)</th><th>Bu ayarlar (turuncu)</th></tr></thead><tbody>' +
+                    row('Yürürken geride (m)', origLag.meanMovingM, simLag.meanMovingM, true, 1) +
+                    row('Yürürken geride P90 (m)', origLag.p90MovingM, simLag.p90MovingM, true, 1) +
+                    row('Dururken gerilik başlangıç (m)', origLag.gapAtStopM, simLag.gapAtStopM, true, 1) +
+                    row('Durduktan 3 sn sonra (m)', origLag.gapAfter3M, simLag.gapAfter3M, true, 1) +
+                    row('Yetişme süresi (sn)', origLag.catchupMedianSec, simLag.catchupMedianSec, true, 1) +
+                    row('Dururken titreme (m)', origLag.meanStoppedM, simLag.meanStoppedM, true, 1) +
                     row('Max sıçrama (m)', orig.maxJump, sim.bigJumps.maxDist, true, 1) +
                     row('>25 m sıçrama', orig.jumpOver25, sim.bigJumps.over25, true, 0) +
                     row('Hatalı donma (fix)', orig.staleFixes, sim.worstStale.fixes, true, 0) +
-                    row('Red / yutulan', null, sim.counts.reject + sim.counts.silentNoCallback, true, 0) +
+                    row('İlk gerçek (sn)', orig.firstRealAfterSec, sim.firstRealAfterSec, true, 1) +
+                    row('Yeniden çıpa', orig.reanchors, sim.reanchors.length, true, 0) +
                     '</tbody></table>' +
                     sessionHint(log) +
-                    '<p class="hint">Turuncu yol = simülasyon. Pembe halka = yeniden çıpalama. Yeşil hücre = yeni kod daha iyi.</p>';
+                    '<p class="hint">Yetişme süresi yalnızca pin duruş noktasına gerçekten yaklaşırsa dolar; 20 artık yazılmaz. Asıl bakılacak satır <b>Durduktan 3 sn sonra</b>: durunca pin hâlâ kaç metre geride. — ise logda net bir yürü-dur yok.</p>';
 
                 document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
                 var simTab = document.querySelector('.tab[data-tab="sim"]');
@@ -1054,6 +1239,46 @@
         }
 
         document.getElementById('simBtn').onclick = runSimulation;
+
+        (function bindSimFilters() {
+            loadSimFilters();
+            document.querySelectorAll('.sim-presets button').forEach(function (btn) {
+                btn.onclick = function () {
+                    document.querySelectorAll('.sim-presets button').forEach(function (b) { b.classList.remove('active'); });
+                    btn.classList.add('active');
+                    var id = btn.getAttribute('data-preset');
+                    if (id === 'app') applySimFilters(SIM_DEFAULTS);
+                    else if (id === 'record') {
+                        var rec = recordedSimFilters();
+                        if (!rec) {
+                            document.getElementById('simErr').textContent = 'Bu logda session.filters yok — önce varsayılanı kullan.';
+                            applySimFilters(SIM_DEFAULTS);
+                        } else applySimFilters(rec);
+                    } else if (id === 'lag') applySimFilters({
+                        enableLowPassFilter: true,
+                        indoorLowPassTau: 0.2,
+                        indoorKalmanR: 0.15,
+                        kalmanProcessNoise: 0.08,
+                        indoorMedianWindowSize: 3,
+                        experimentalFusion: false,
+                        clampDisplayJump: true
+                    });
+                    else if (id === 'fusion') applySimFilters({
+                        enableLowPassFilter: true,
+                        indoorLowPassTau: 0.2,
+                        indoorKalmanR: 0.15,
+                        kalmanProcessNoise: 0.05,
+                        indoorMedianWindowSize: 3,
+                        experimentalFusion: true,
+                        clampDisplayJump: true
+                    });
+                };
+            });
+            ['simTau', 'simR', 'simQ', 'simMedian', 'simLpf', 'simFusion', 'simClamp'].forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) el.addEventListener('change', saveSimFilters);
+            });
+        })();
 
         (function bindIndicatorCfg() {
             var th = document.getElementById('indThreshold');
