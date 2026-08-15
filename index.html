@@ -3,142 +3,26 @@
 
 <head>
     <meta charset="utf-8">
-    <title>SimpleLocate Extended - Demo</title>
+    <title>SimpleLocate Extended</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Leaflet SimpleLocate Extended - İç mekan konum belirleme eklentisi">
-
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta http-equiv="refresh" content="0; url=app.html">
+    <script>location.replace('app.html?t=' + Date.now());</script>
     <style>
-        /* Sayfa temel stilleri */
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        html,
-        body {
-            height: 100%;
-            font-family: system-ui, -apple-system, sans-serif;
-        }
-
-        #map {
-            height: 100%;
-            width: 100%;
-        }
-
-        /* Demo bilgi paneli */
-        .demo-info {
-            position: absolute;
-            bottom: 20px;
-            left: 20px;
-            z-index: 1000;
-            background: rgba(255, 255, 255, 0.95);
-            padding: 12px 16px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
-            font-size: 13px;
-            max-width: 300px;
-        }
-
-        .demo-info h3 {
-            margin-bottom: 8px;
-            font-size: 14px;
-            color: #333;
-        }
-
-        .demo-info p {
-            color: #666;
-            line-height: 1.5;
-            margin-bottom: 6px;
-        }
-
-        .demo-info code {
-            background: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 12px;
-        }
+        body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; padding: 24px; }
+        ul { padding-left: 18px; }
+        li { margin: 6px 0; }
     </style>
 </head>
 
 <body>
-    <div id="map"></div>
-
-    <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-
-    <!-- SimpleLocate Plugin (CSS otomatik dahil!) -->
-    <script src="src/low-pass-filter.js"></script>
-    <script src="src/leaflet-simple-locate.js"></script>
-    <script src="src/simple-locate-extended.js"></script>
-    <script src="src/simple-locate-panel.js"></script>
-
-    <script>
-        // Haritayı oluştur
-        const map = L.map('map').setView([37.4257, 31.8525], 17);
-
-        // OpenStreetMap tile layer
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-            maxZoom: 19
-        }).addTo(map);
-
-        // Geofence polygon (saat yönünde sıralı)
-        const geofencePolygon = [
-            { lat: 37.426070, lng: 31.851988 },
-            { lat: 37.425787, lng: 31.852096 },
-            { lat: 37.425840, lng: 31.852283 },
-            { lat: 37.426117, lng: 31.852171 }
-        ];
-        // SimpleLocate Extended'ı başlat
-        const locateControl = L.simplelocate({
-            position: 'topright',
-            geofence: { polygon: geofencePolygon },
-            drawGeofence: true,          // Geofence'i plugin çizsin (panelden aç/kapat)
-            advancedFiltering: true,
-            indoorMode: true,
-            controlPanel: true,          // Birleşik Ayarlar + Loglar drawer'ı
-            enableDeadReckoning: true,
-            pdrStepLength: 0.65,
-
-            // Altitude & Kat Tespiti (İstanbul Havalimanı)
-            enableAltitude: true,        // Altitude normalizasyonu aktif
-            geoidUndulation: 39.0,       // İstanbul bölgesi geoid ondülasyonu (~39m)
-            enableFloorDetection: true,
-
-            floors: [
-                { floor: -2, name: "-2", minAlt: 0, maxAlt: 500 },
-                { floor: -1, name: "-1", minAlt: 500, maxAlt: 1000 },
-                { floor: 0, name: "Zemin", minAlt: 1000, maxAlt: 1500 },
-                { floor: 1, name: "1", minAlt: 1500, maxAlt: 2000 },
-                { floor: 2, name: "2", minAlt: 2000, maxAlt: 2500 },
-                { floor: 3, name: "3", minAlt: 2500, maxAlt: 3000 },
-            ],
-
-            // Otomatik log yükleme — konum durdurulunca Supabase'e kaydeder
-            panelOptions: {
-                autoUpload: {
-                    enabled: true,
-                    url: 'https://qzqnccxrkmjrlwsukgpi.supabase.co/rest/v1/test_logs',
-                    apiKey: 'sb_publishable_-HMpCAG0-VU28lx3SXlE-A_5NRZxs93',
-                    label: 'test',
-                    compress: true,
-                    minEntries: 5
-                }
-            },
-
-            afterDeviceMove: function (location) {
-                // Konum güncellemelerini burada işleyebilirsiniz
-            }
-        }).addTo(map);
-
-        // Haritayı geofence'e fit et
-        map.fitBounds(L.polygon(geofencePolygon.map(p => [p.lat, p.lng])).getBounds().pad(0.2));
-
-    </script>
+    <p><a href="app.html">Uygulamaya git (İstanbul Havalimanı)</a></p>
+    <ul>
+        <li><a href="log-viewer.html">Log görüntüleyici</a></li>
+        <li><a href="demo-colors.html">Renk / görünüm denemesi</a></li>
+    </ul>
 </body>
 
 </html>

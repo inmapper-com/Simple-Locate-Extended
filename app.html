@@ -1,0 +1,178 @@
+﻿<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="utf-8">
+    <title>SimpleLocate Extended — İstanbul Havalimanı</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta name="description" content="Leaflet SimpleLocate Extended — iç mekân konum belirleme, kat tespiti ve en yakın birim">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+    <style>
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; height: 100%; }
+        body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+        #map { position: absolute; inset: 0; }
+    </style>
+</head>
+
+<body>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- SimpleLocate eklentisi (CSS otomatik dahil) -->
+    <script src="src/low-pass-filter.js?v=20260814b"></script>
+    <script src="src/leaflet-simple-locate.js?v=20260814b"></script>
+    <script src="src/simple-locate-extended.js?v=20260814b"></script>
+    <script src="src/simple-locate-floorplan.js?v=20260814b"></script>
+    <script src="src/simple-locate-panel.js?v=20260814b"></script>
+
+    <!-- İstanbul Havalimanı kat planları: georeferans + kat listesi + birim seçimi -->
+    <script src="demo/plans/ist-floorplans.js?v=20260810a"></script>
+
+    <script>
+    (function () {
+        'use strict';
+
+        var IST = window.IST_FLOOR_PLANS;
+        var floorPlans = IST.build();
+        var REF = IST.referenceBounds;
+
+        // ── Yükseklikten kat tespiti ─────────────────────────────────────────
+        var GROUND_ALT = 99;
+        var FLOOR_H = 6;
+
+        var floorBands = floorPlans.floors.map(function (f) {
+            var base = GROUND_ALT + f.floor * FLOOR_H;
+            return {
+                floor: f.floor,
+                name: f.name,
+                minAlt: base - FLOOR_H / 2,
+                maxAlt: base + FLOOR_H / 2
+            };
+        });
+
+        var geofencePolygon = [
+            { lat: REF.north, lng: REF.west },
+            { lat: REF.north, lng: REF.east },
+            { lat: REF.south, lng: REF.east },
+            { lat: REF.south, lng: REF.west }
+        ];
+
+        var map = L.map('map', { zoomControl: true })
+            .setView([IST.center.lat, IST.center.lng], 16);
+
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 21, maxNativeZoom: 19, attribution: 'Esri World Imagery'
+        }).addTo(map);
+
+        // Kat planı altlığı — panelden açılır; uydu görüntüsü üzerinde hizalamayı doğrular
+        var planLayer = null;
+        var planVisible = false;
+        var shownFloor = null;
+
+        function floorDef(floor) {
+            for (var i = 0; i < floorPlans.floors.length; i++) {
+                if (floorPlans.floors[i].floor === floor) return floorPlans.floors[i];
+            }
+            return null;
+        }
+
+        function hidePlanOverlay() {
+            if (planLayer) {
+                map.removeLayer(planLayer);
+                planLayer = null;
+            }
+            shownFloor = null;
+        }
+
+        function updatePlanOverlay(locate) {
+            if (!planVisible || !locate) {
+                hidePlanOverlay();
+                return;
+            }
+            var f = locate.getFloorPlanFloor(null);
+            if (f == null) return;
+            if (f === shownFloor && planLayer) return;
+            var def = floorDef(f);
+            if (!def) return;
+            if (planLayer) map.removeLayer(planLayer);
+            planLayer = L.imageOverlay(def.svg,
+                [[def.bounds.north, def.bounds.west], [def.bounds.south, def.bounds.east]],
+                { opacity: 0.65, interactive: false, className: 'ist-plan-overlay' });
+            planLayer.addTo(map);
+            shownFloor = f;
+        }
+
+        var locate = L.simplelocate({
+            position: 'topright',
+            geofence: { polygon: geofencePolygon },
+            drawGeofence: false,
+            advancedFiltering: true,
+            indoorMode: true,
+            controlPanel: true,
+            enableDeadReckoning: true,
+            pdrStepLength: 0.65,
+
+            markerColor: '#1a73e8',
+            markerRingColor: '#ffffff',
+            orientationColor: '#0077ff',
+            circleColor: '#8ba2bb',
+            circleFillOpacity: 0.2,
+            circleStrokeColor: '#ffffff',
+            circleStrokeWeight: 4,
+            circleStrokeOpacity: 0.85,
+
+            fadeMarkerOnFallback: true,
+            fallbackMarkerOpacity: 0.45,
+            fallbackMarkerColor: '#4c9bf0',
+            fallbackOrientationColor: '#9e9e9e',
+
+            coarseAccuracyMode: true,
+            coarseAccuracyThreshold: 25,
+            coarseAccuracyHideMarker: true,
+            headingCone: true,
+
+            enableAltitude: true,
+            geoidUndulation: 39.0,
+            enableFloorDetection: true,
+            floors: floorBands,
+
+            panelOptions: {
+                floorPlanOverlay: false,
+                onFloorPlanOverlayChange: function (visible) {
+                    planVisible = visible;
+                    updatePlanOverlay(locate);
+                },
+                autoUpload: {
+                    enabled: true,
+                    url: 'https://europe-west1-tubitak-1507-2025.cloudfunctions.net/logs-api',
+                    apiKey: 'locate_dev_key_change_me_01',
+                    compress: true,
+                    minEntries: 5
+                }
+            },
+
+            floorPlans: Object.assign({}, floorPlans, {
+                defaultFloor: 0,
+                maxCandidates: 5
+            })
+        }).addTo(map);
+
+        setInterval(function () {
+            if (planVisible) updatePlanOverlay(locate);
+        }, 700);
+
+        map.fitBounds([[REF.south, REF.west], [REF.north, REF.east]]);
+
+        window.ISTApp = { map: map, locate: locate, floorPlans: floorPlans };
+    })();
+    </script>
+</body>
+
+</html>

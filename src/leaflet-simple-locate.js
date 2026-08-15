@@ -90,6 +90,10 @@
     cursor: grab;
     background: transparent !important;
     border: none !important;
+    /* Sönümleme yalnızca stil sayfasından verilir. Satır içi transition yazılırsa
+       Leaflet'in zoom animasyonundaki transform geçişi ezilir ve marker, çember
+       animasyonla gelirken anında yeni konumuna atlar (zoom sırasında kayma). */
+    transition: opacity .3s ease;
 }
 
 .leaflet-simple-locate-icon stop {
@@ -117,14 +121,36 @@
     transform: rotate(var(--leaflet-simple-locate-orientation, 0deg));
 }
 
+/* Kaba doğruluk yön konisi. Dolgu opaklığı JS tarafında CONE_FILL_OPACITY ile
+   verilir; dolgu radyal gradyan olduğundan bu değer yalnızca en parlak dış
+   kenarda görülür. Nabız, konum noktasındaki yön okuyla aynı değerlerde
+   (.75 → .33, 2s, doğrusal) öğe opaklığı üzerinden uygulanır — böylece
+   Leaflet'in fill-opacity stiliyle çakışmaz. */
+.leaflet-simple-locate-cone {
+    pointer-events: none !important;
+    animation: leaflet-simple-locate-cone-pulse 2s linear infinite;
+}
+
+@keyframes leaflet-simple-locate-cone-pulse {
+    0%, 100% { opacity: .75; }
+    50% { opacity: .33; }
+}
+
 #leaflet-simple-locate-icon-spot {
     pointer-events: auto;
     cursor: pointer;
 }
 
-/* Spinner animasyonu */
-.leaflet-simple-locate svg g {
-    transform-origin: center;
+/* Spinner animasyonu — buton içinde, merkezinde sabit kalarak saat yönünde döner.
+   (Kök <svg> öğesi döndürülür: transform-origin kutu merkezine göre çözülür,
+   tarayıcılar arası transform-box farklarından etkilenmez.) */
+.leaflet-simple-locate-spinner {
+    transform-origin: 50% 50%;
+    animation: leaflet-simple-locate-spin .9s linear infinite;
+}
+
+@keyframes leaflet-simple-locate-spin {
+    to { transform: rotate(360deg); }
 }
 
 /* Extended plugin kontrolleri */
@@ -178,6 +204,163 @@
     }
 })(function (L) {
     "use strict";
+
+    // ════════════════════════════════════════════════════════════════
+    // KABA DOĞRULUK GÖSTERİMİ — paylaşılan karar ve geometri hesapları
+    // Aynı hesabın demo/test sayfalarından da çağrılabilmesi için saf
+    // fonksiyon tutulur; sınıfa statik olarak da bağlanır (aşağıda).
+    // ════════════════════════════════════════════════════════════════
+    var COARSE_THRESHOLD = 30;      // m — varsayılan kaba gösterim eşiği
+    var CONE_MIN_ANGLE = 34;        // ° — eşiğe yakın doğrulukta koninin toplam açısı
+    var CONE_MAX_ANGLE = 120;       // ° — en kötü durumda koninin toplam açısı
+    var CONE_ANGLE_SATURATION = 4;  // Açı, eşiğin bu katına gelindiğinde maksimuma ulaşır
+    var CONE_MIN_RADIUS_PX = 28;    // px — çember ekranda bundan küçükken nokta gizlenmez
+    // Koni, merkezden dışa açılan bir dilimdir. Yan kenarlar ve dış yay keskindir;
+    // yumuşaklık yalnızca radyal gradyanın merkeze doğru sönümünden gelir.
+    var CONE_FILL_OPACITY = 0.6;    // Dilimin en parlak yerindeki opaklık
+    // Radyal gradyan: çember kenarında tam güçte, merkeze doğru sönerek kaybolur.
+    // İlk iki durak arası tamamen saydamdır: dilimin merkezdeki tepe noktası ne kadar
+    // sönük olsa da sivri uç olarak okunuyordu, bu ölü bölge onu tümüyle gizler.
+    var CONE_GRADIENT_STOPS = [[0, 0], [0.46, 0], [0.72, 0.35], [0.9, 0.8], [1, 1]];
+    // Dilim çemberi biraz aşar; taşan kısım kırpılınca dış yay çokgen yaklaşımı
+    // yerine çemberin kendi eğrisini birebir izler.
+    var CONE_OUTER_OVERSHOOT = 1.06;
+
+    function coarseThreshold(options) {
+        var t = options ? options.coarseAccuracyThreshold : null;
+        return (t != null && isFinite(t) && t > 0) ? t : COARSE_THRESHOLD;
+    }
+
+    // Kaba gösterime geçilmeli mi?
+    // Metre eşiğinin yanında EKRAN yarıçapına da bakılır: harita uzaklaştırıldığında
+    // 40 m'lik çember birkaç piksele düşer; orada noktayı gizlemek kullanıcıyı
+    // görünür konumsuz bırakır. state: {accuracy, radiusPx, isFallback, options}
+    function isCoarseAccuracy(state) {
+        var o = state.options || {};
+        if (o.coarseAccuracyMode === false) return false;
+        if (o.coarseAccuracyOnlyFallback && !state.isFallback) return false;
+        var acc = state.accuracy;
+        if (acc == null || !isFinite(acc) || acc < coarseThreshold(o)) return false;
+        if (state.radiusPx != null && isFinite(state.radiusPx) &&
+            state.radiusPx < CONE_MIN_RADIUS_PX) return false;
+        return true;
+    }
+
+    // Koninin TOPLAM açısı (derece). Konum doğruluğu kötüleştikçe genişler; pusula
+    // belirsizliği biliniyorsa (iOS webkitCompassAccuracy, ±derece) ondan gelen
+    // genişlikle karşılaştırılıp geniş olan kullanılır (iOS'ta koni = pusula güveni).
+    function headingConeAngle(accuracy, headingAccuracy, options) {
+        var threshold = coarseThreshold(options);
+        var span = Math.max(1, threshold * CONE_ANGLE_SATURATION - threshold);
+        var t = Math.max(0, Math.min(1, ((accuracy || 0) - threshold) / span));
+        var total = CONE_MIN_ANGLE + (CONE_MAX_ANGLE - CONE_MIN_ANGLE) * t;
+        if (headingAccuracy != null && isFinite(headingAccuracy) && headingAccuracy > 0) {
+            total = Math.max(total, Math.min(CONE_MAX_ANGLE, headingAccuracy * 2));
+        }
+        return total;
+    }
+
+    // Verilen konumdan metre cinsinden ötelenmiş nokta ([lat, lng]).
+    function metersOffset(lat, lng, meters, bearingDeg) {
+        var latRad = lat * Math.PI / 180;
+        var mPerDegLat = 111132.92 - 559.82 * Math.cos(2 * latRad) + 1.175 * Math.cos(4 * latRad);
+        var mPerDegLng = 111412.84 * Math.cos(latRad) - 93.5 * Math.cos(3 * latRad);
+        if (!isFinite(mPerDegLng) || Math.abs(mPerDegLng) < 1) mPerDegLng = 1;
+        var b = bearingDeg * Math.PI / 180;
+        return [lat + (meters * Math.cos(b)) / mPerDegLat,
+                lng + (meters * Math.sin(b)) / mPerDegLng];
+    }
+
+    // Daire dilimi köşeleri: tepe noktası merkezde, yay doğruluk çemberinin kenarında.
+    function coneWedge(lat, lng, radius, headingDeg, halfAngleDeg, segments) {
+        var n = Math.max(8, segments || 24);
+        var start = headingDeg - halfAngleDeg;
+        var sweep = 2 * halfAngleDeg;
+        var pts = [[lat, lng]];
+        for (var i = 0; i <= n; i++) {
+            pts.push(metersOffset(lat, lng, radius, start + sweep * (i / n)));
+        }
+        return pts;
+    }
+
+    // Yön konisi: merkezden dışa açılan dilim. Yarıçap doğrulukla birebir ölçeklenir,
+    // böylece çember büyüdükçe koni de büyür. Dolgu çember kenarında en güçlü olup
+    // merkeze doğru söner; kenarlar keskindir (bkz. paintHeadingCone).
+    // state: {lat, lng, accuracy, heading, headingAccuracy, options}
+    function headingConeShape(state) {
+        var radius = state.accuracy || 0;
+        var angle = headingConeAngle(state.accuracy, state.headingAccuracy, state.options);
+        var half = angle / 2;
+        return {
+            radius: radius,
+            angle: angle,
+            fillOpacity: CONE_FILL_OPACITY,
+            latlngs: coneWedge(state.lat, state.lng, radius * CONE_OUTER_OVERSHOOT,
+                state.heading, half, Math.max(12, Math.round(half / 2)))
+        };
+    }
+
+    // Koni yolunu ışımaya çevirir: radyal gradyan (çember kenarında tam güçte,
+    // merkeze doğru sıfıra söner) + doğruluk çemberine kırpma. Bulanıklık yoktur;
+    // yan kenarlar ve dış yay keskin kalır.
+    // Leaflet düz renk atadığı için fill/clip doğrudan SVG üzerinde kurulur;
+    // bu yüzden koni oluşturulduktan sonra setStyle ile renk EZİLMEMELİDİR.
+    // state: {cx, cy, radiusPx, color, id} — cx/cy/radiusPx layer point uzayında
+    function paintHeadingCone(path, state) {
+        if (!path || typeof document === 'undefined') return false;
+        var svg = path.ownerSVGElement;
+        if (!svg) return false;   // canvas renderer → düz dolguyla yetin
+
+        var ns = 'http://www.w3.org/2000/svg';
+        var make = function (name) { return document.createElementNS(ns, name); };
+        var gradId = 'sl-cone-grad-' + state.id;
+        var clipId = 'sl-cone-clip-' + state.id;
+        var r = Math.max(1, state.radiusPx || 1);
+
+        var defs = svg.querySelector('defs.sl-cone-defs');
+        if (!defs) {
+            defs = make('defs');
+            defs.setAttribute('class', 'sl-cone-defs');
+            svg.insertBefore(defs, svg.firstChild);
+        }
+
+        var grad = defs.querySelector('#' + gradId);
+        if (!grad) {
+            grad = make('radialGradient');
+            grad.setAttribute('id', gradId);
+            grad.setAttribute('gradientUnits', 'userSpaceOnUse');
+            CONE_GRADIENT_STOPS.forEach(function (s) {
+                var stop = make('stop');
+                stop.setAttribute('offset', s[0]);
+                stop.setAttribute('stop-opacity', s[1]);
+                grad.appendChild(stop);
+            });
+            defs.appendChild(grad);
+        }
+        grad.setAttribute('cx', state.cx);
+        grad.setAttribute('cy', state.cy);
+        grad.setAttribute('r', r);
+        for (var i = 0; i < grad.childNodes.length; i++) {
+            grad.childNodes[i].setAttribute('stop-color', state.color);
+        }
+
+        var clip = defs.querySelector('#' + clipId);
+        if (!clip) {
+            clip = make('clipPath');
+            clip.setAttribute('id', clipId);
+            clip.setAttribute('clipPathUnits', 'userSpaceOnUse');
+            clip.appendChild(make('circle'));
+            defs.appendChild(clip);
+        }
+        clip.firstChild.setAttribute('cx', state.cx);
+        clip.firstChild.setAttribute('cy', state.cy);
+        clip.firstChild.setAttribute('r', r);
+
+        path.setAttribute('fill', 'url(#' + gradId + ')');
+        path.removeAttribute('filter');   // önceki sürümden kalan bulanıklığı temizle
+        path.setAttribute('clip-path', 'url(#' + clipId + ')');
+        return true;
+    }
 
     const SimpleLocate = L.Control.extend({
         options: {
@@ -243,6 +426,79 @@
             maxHumanSpeed: 5,             // Maksimum insan yürüyüş hızı (m/s) - ~18 km/h
             maxIndoorSpeed: 6,            // İç mekanda maks hız (m/s) — multipath teleportda
                                           // last-good'a düşmeyi azaltmak için 3'ten yükseltildi
+
+            // ── Hız kontrolünde konum belirsizliği ──
+            // İki fix arasındaki mesafe yalnızca hareketten değil, ölçüm belirsizliğinden de
+            // doğar: ±80m'lik bir fix ile ±15m'lik bir fix arasında 80m sapma "hareket" değildir.
+            // İzinli mesafe = maxSpeed·dt + sqrt(acc_çıpa² + acc_yeni²) · faktör.
+            speedUncertaintyFactor: 1.0,  // 0 = eski davranış (yalnızca hız)
+            // Bu accuracy'den kötü fix hız çıpası olarak kullanılmaz; daha iyi bir çıpa varsa o
+            // seçilir. Çıpa yalnızca kötü fix'lerden oluşuyorsa ve yeni fix belirgin biçimde
+            // daha iyiyse, ölçümün iyisine güvenilir (kötü çıpa konumu kilitlemesin).
+            speedAnchorMaxAccuracy: 40,
+            // Kötü çıpanın hatası bu katsayı × accuracy kadar olabilir kabul edilir. Daha iyi
+            // bir fix ancak bu sınır içindeyse çıpayı devirir; ±45m'lik bir çıpa 500m'lik bir
+            // sıçramayı meşrulaştıramaz.
+            speedAnchorTrustMultiplier: 3,
+
+            // ── Konsensüs tabanlı yeniden çıpalama ──
+            // Reddedilen fix'ler birbirini doğruluyorsa (sıkı küme, makul accuracy, yeterli süre)
+            // sorun gelen sinyalde değil çıpadadır: konum kümenin merkezine taşınır ve filtre
+            // durumu sıfırlanır. Tek başına gelen multipath sıçraması bunu tetiklemez.
+            enableConsensusReanchor: true,
+            reanchorMinFixes: 3,          // Kaç ardışık red birbirini doğrulamalı
+            reanchorClusterRadius: 15,    // Küme yarıçapı tabanı (m) — accuracy ile ölçeklenir
+            reanchorMinSpanMs: 1800,      // Küme en az bu süreye yayılmalı (anlık sıçrama değil)
+            reanchorMaxAccuracy: 35,      // Kümedeki fix'ler için maks accuracy (m)
+            reanchorCooldownMs: 12000,    // İki yeniden çıpalama arası minimum süre
+            reanchorMinDistance: 20,      // Bundan yakın sapmalarda çıpa değiştirilmez (m)
+
+            // Kanıt eşiği düzeltmenin büyüklüğüne göre artar. Bu mesafeyi aşan bir düzeltme
+            // "uzak" sayılır: daha çok fix, daha uzun gözlem, daha iyi accuracy ve kendine ait
+            // bir soğuma süresi ister. Amaç, birbirinden uzak iki multipath kümesi arasında
+            // ekranın tekrar tekrar ışınlanmasını (A↔B salınımı) engellemektir.
+            // NOT: Ayırt edici ölçüt accuracy DEĞİL, kümenin ısrarıdır. Sahada yanlış çıpayı
+            // düzelten küme ile A↔B salınımı üreten küme benzer accuracy'ye sahipti; farkı
+            // biri 10+ saniye ısrar ederken diğerinin 2-3 saniyede sönmesiydi.
+            reanchorMaxDistance: 50,      // m — bunun üstü "uzak düzeltme"
+            reanchorFarMinFixes: 5,       // Uzak düzeltme için gereken fix sayısı
+            reanchorFarMinSpanMs: 4000,   // Uzak düzeltme için gereken gözlem süresi
+            reanchorFarMaxAccuracy: 35,   // Uzak düzeltmede kümeden istenen accuracy (m)
+            reanchorFarCooldownMs: 30000, // İki uzak düzeltme arası minimum süre
+
+            // Düzeltme, geçen sürede yürünebilecek mesafe + iki ölçümün belirsizliği ile
+            // açıklanabilmeli. Sinyal reddedildikçe izin büyüdüğü için kalıcı biçimde yanlış
+            // bir çıpa yine düzelir; ama saniyeler içinde 100m ışınlanma olmaz.
+            // A→B taşındıktan sonra bu süre içinde tekrar A'ya (bu yarıçap içine) dönme isteği
+            // salınım sayılır ve bastırılır. Salınımı meşru düzeltmeden ayıran asıl ölçüt budur.
+            reanchorPingPongMs: 180000,
+            reanchorPingPongRadius: 40,
+
+            // Kaçış yolu: yukarıdaki kapılar yüzünden ekran kalıcı biçimde yanlış yerde
+            // donmasın. Küme bu kadar fix ve süre boyunca ısrarla aynı yeri gösteriyorsa
+            // ping-pong/hız kapıları aşılır — ısrar, tek seferlik bir multipath sıçramasının
+            // üretemeyeceği bir kanıttır (kullanıcı gerçekten geri dönmüş de olabilir).
+            reanchorOverrideFixes: 7,
+            reanchorOverrideSpanMs: 7000,
+
+            // İsteğe bağlı ek sıkılık: düzeltme "geçen sürede yürünebilecek mesafe + ölçüm
+            // belirsizliği" ile açıklanamıyorsa reddedilir. Varsayılan kapalı — saha logları
+            // bu testin meşru düzeltmeleri de kestiğini gösterdi (bkz. reanchorPingPongMs).
+            reanchorMaxSpeed: 0,          // m/s — 0 = kapalı
+            reanchorUncertaintyFactor: 1.2, // ±accuracy payının katsayısı
+
+            // ── Görüntü uzayı sıçrama koruması ──
+            // Ardışık GÖSTERİLEN konumlar arası sapma; filtre içi durum kaymalarının sessizce
+            // ekrana ışınlanmasını yakalar (teşhis + panel etiketi).
+            displayJumpMaxDistance: 25,   // m — bir güncellemede izin verilen maks görüntü adımı
+            // Eşiği aşan adım tek karede ışınlanmak yerine eşik kadar taşınır (marker kayar,
+            // sonraki güncellemelerde hedefe yetişir). Yeniden çıpalama bundan muaftır:
+            // orası bilinçli bir düzeltmedir, tek adımda oturması gerekir.
+            clampDisplayJump: true,
+            // Gösterim bu süredir tazelenmiyorsa (donma/fallback/PDR) büyük adım beklenen bir
+            // toparlanmadır: sınırlanmaz, tek adımda oturur ('resync'). Sınırlama yalnızca
+            // kesintisiz takip sırasındaki açıklanamayan sıçramalar için geçerlidir.
+            displayResyncAfterMs: 3000,
             
             // Son İyi Konum Fallback
             enableLastGoodLocation: true, // Kötü konum geldiğinde son iyi konumu kullan
@@ -276,8 +532,10 @@
             markerRingColor: '#ffffff',     // Marker dış halka rengi
             markerShadowColor: '#000000',   // Marker gölge rengi
             orientationColor: '#c00000',    // Yön oku üst kısım rengi
-            circleColor: '#000000',         // Accuracy circle rengi
+            circleColor: '#000000',         // Accuracy circle rengi (dolgu + varsayılan çizgi)
             circleFillOpacity: 0.2,         // Circle dolgu opaklığı
+            circleStrokeColor: null,        // Circle çizgi rengi (null → circleColor)
+            circleStrokeWeight: 1,          // Circle çizgi kalınlığı (px, 0 = çizgisiz)
             circleStrokeOpacity: 0.5,       // Circle çizgi opaklığı
             
             // ========== FALLBACK MARKER FADE ==========
@@ -285,6 +543,21 @@
             fallbackMarkerOpacity: 0.45,    // Silikleştirilmiş marker opacity değeri (0-1)
             fallbackMarkerColor: '#9E9E9E', // Fallback durumunda marker iç nokta rengi
             fallbackOrientationColor: '#9E9E9E', // Fallback durumunda yön oku rengi
+
+            // ========== KABA DOĞRULUK GÖSTERİMİ (iOS tarzı) ==========
+            // iOS iç mekan davranışı: doğruluk çemberi belirgin büyüdüğünde nokta gösterilmez
+            // (var olmayan bir kesinlik hissi vermemek için) — yalnızca çember kalır. Yön ise
+            // ekrana sabit küçük ok yerine ÇEMBERLE BİRLİKTE ölçeklenen geniş bir koniye döner;
+            // koninin açısı belirsizlik arttıkça genişler (pusula güveni + konum doğruluğu).
+            // Tek anlamlı ayar eşiktir; koninin açı/yarıçap/opaklık değerleri görsel tutarlılık
+            // için sabittir (bkz. CONE_* sabitleri).
+            coarseAccuracyMode: true,        // Kaba gösterim aktif
+            coarseAccuracyThreshold: 30,     // m — bu doğruluğun üstünde kaba gösterime geç
+            coarseAccuracyHideMarker: true,  // Kaba modda konum noktasını gizle (yalnız çember + koni)
+            coarseAccuracyOnlyFallback: false, // true → yalnızca fallback/PDR durumunda uygula
+            headingCone: true,               // Kaba modda yön konisi çiz
+            headingConeColor: null,          // null → fallbackOrientationColor / orientationColor
+
             
             // ========== PEDESTRIAN DEAD RECKONING (PDR) ==========
             enableDeadReckoning: false,     // PDR varsayılan kapalı (kullanıcı açabilir)
@@ -356,6 +629,7 @@
             altitudeMedianWindow: 5,        // Altitude median filtre pencere boyutu
             altitudeLowPassTau: 2.0,        // Altitude low-pass filtre tau (yavaş değişim)
             altitudeMaxDelta: 10,           // Tek adımda max kabul edilebilir altitude değişimi (m)
+            altitudeReanchorFixes: 5,       // Bu kadar ardışık sıçrama sonrası filtre yeni yüksekliğe çıpalanır
             altitudeMinAccuracy: 20,        // Bu değerin üstündeki altitudeAccuracy reddedilir (m)
             
             // Kat tespiti
@@ -363,7 +637,12 @@
             floorHeight: 3.0,              // Kat yüksekliği (metre) - standart bina
             groundFloorAltitude: null,      // Zemin kat rakımı (MSL metre) - KALİBRASYON GEREKLİ
             groundFloorNumber: 0,           // Zemin kat numarası (0 veya 1)
-            floorHysteresis: 0.8,           // Kat değişimi için histerezis (metre) - titreşimi engeller
+            // Kat değişimi için yeni katın sınırından içeride olunması gereken pay (m).
+            // Aralığın çeyreğiyle sınırlanır; GPS düşey gürültüsü kat yüksekliğine
+            // yakın olduğu için küçük bir değer sınırda salınıma yol açar.
+            floorHysteresis: 1.5,
+            floorChangeMinFixes: 3,         // Kat değişimi için gereken ardışık mutabık ölçüm
+            floorChangeCooldownMs: 4000,    // Kat değişimleri arasında en az bekleme (ms)
             floors: null,                   // Manuel kat tanımları: [{floor: 0, name: "Zemin", minAlt: 1050, maxAlt: 1053}, ...]
 
             afterClick: null,
@@ -380,18 +659,9 @@
 	<circle cx="8" cy="8" r="1" />
 </svg>`,
             htmlSpinner: `
-<svg width="16" height="16" viewBox="-8 -8 16 16" xmlns="http://www.w3.org/2000/svg">
-	<g>
-		<circle opacity=".7" cx="0" cy="-6" r=".9" transform="rotate(90)" />
-		<circle opacity=".9" cx="0" cy="-6" r="1.3" transform="rotate(45)" />
-		<circle opacity="1" cx="0" cy="-6" r="1.5" />
-		<circle opacity=".95" cx="0" cy="-6" r="1.42" transform="rotate(-45)" />
-		<circle opacity=".85" cx="0" cy="-6" r="1.26" transform="rotate(-90)" />
-		<circle opacity=".7" cx="0" cy="-6" r="1.02" transform="rotate(-135)" />
-		<circle opacity=".5" cx="0" cy="-6" r=".7" transform="rotate(-180)" />
-		<circle opacity=".25" cx="0" cy="-6" r=".3" transform="rotate(-225)" />
-		<animateTransform attributeName="transform" type="rotate" values="0;0;45;45;90;90;135;135;180;180;225;225;270;270;315;315;360" keyTimes="0;.125;.125;.25;.25;.375;.375;.5;.5;.675;.675;.75;.75;.875;.875;1;1" dur="1.3s" repeatCount="indefinite" />
-	</g>
+<svg class="leaflet-simple-locate-spinner" width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
+	<circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="1.8" />
+	<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M 8,1.8 A 6.2,6.2 0 0 1 14.2,8" />
 </svg>`,
             htmlGeolocation: `
 <svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">
@@ -466,6 +736,10 @@
             this._circle = undefined;
             this._circleStyleInterval = undefined;
             this._isZooming = false;
+            // Kaba doğruluk gösterimi (nokta gizli + harita uzayında yön konisi)
+            this._cone = null;
+            this._isCoarseDisplay = false;
+            this._coneAngle = null;
 
             // button state
             this._clicked = undefined;
@@ -481,6 +755,7 @@
             this._orientationSamples = [];    // Yön yumuşatma için son N örnek
             this._lastOrientationTime = 0;    // Son yön güncellemesi zamanı
             this._orientationCalibrated = false; // Kalibrasyon durumu
+            this._compassAccuracy = null;      // iOS webkitCompassAccuracy (± derece), koni genişliği için
             this._lastReliableHeading = undefined; // Gimbal lock öncesi son güvenilir yön
             this._inGimbalLockZone = false;   // Gimbal lock bölgesinde mi
             // Jiroskop/tamamlayıcı filtre durumu
@@ -562,6 +837,9 @@
             // Kötü konum sayacı
             this._consecutiveBadLocations = 0;
 
+            // Reddedilen fix'lerin kümesi (konsensüs tabanlı yeniden çıpalama için)
+            this._rejectCluster = { fixes: [], lastReanchorAt: 0, lastFarReanchorAt: 0 };
+
             // Konum oturumu / açılış kapısı
             this._locateSessionStart = null;
             this._coldStart = {
@@ -596,16 +874,21 @@
             
             // ========== ALTITUDE & KAT TESPİTİ STATE ==========
             this._altitude = {
-                raw: null,                  // Ham altitude (platformdan gelen)
+                raw: null,                  // Ham altitude (platformdan gelen, ondülasyon uygulanmamış)
                 normalized: null,           // Normalize edilmiş altitude (MSL)
+                geoid: 0,                   // Ham değerden çıkarılan geoid ondülasyonu (iOS'ta 0)
                 filtered: null,             // Filtrelenmiş altitude
                 accuracy: null,             // Altitude accuracy
                 floor: null,                // Tespit edilen kat numarası
                 floorName: null,            // Kat adı
                 medianBuffer: [],           // Median filtre buffer'ı
                 lowPassFilter: null,        // LowPass filtre instance'ı
+                jumpCount: 0,               // Üst üste reddedilen sıçrama sayısı
                 lastStableFloor: null,      // Son kararlı kat (histerezis için)
+                lastStableFloorName: null,  // Son kararlı katın adı (bant adı korunur)
                 floorChangeTime: 0,         // Son kat değişim zamanı
+                floorCandidate: null,       // Geçiş için beklemede olan kat
+                floorCandidateCount: 0,     // Adayın üst üste kaç ölçümde görüldüğü
                 sampleCount: 0,             // Toplam altitude örneği sayısı
                 platform: null              // Tespit edilen platform ('ios' | 'android' | 'unknown')
             };
@@ -856,18 +1139,31 @@
             return inside;
         },
         
-        // Hız kontrolü - imkansız sıçramaları tespit et
-        _checkSpeedValidity: function (newLat, newLng, timestamp) {
+        // Hız kontrolü - imkansız sıçramaları tespit et.
+        // Çıpa olarak geçmişteki en son YETERİNCE İYİ fix seçilir: ±80m'lik bir fix çıpa
+        // olursa sonraki tüm iyi fix'ler "imkansız hız" sayılıp konum dakikalarca donabilir.
+        // Karşılaştırma mesafesi ayrıca iki fix'in accuracy belirsizliği kadar gevşetilir.
+        _checkSpeedValidity: function (newLat, newLng, timestamp, newAccuracy) {
             const history = this._locationHistory;
             
             // Geçmiş yoksa geçerli kabul et
             if (history.positions.length === 0) {
                 return { valid: true, speed: 0 };
             }
-            
-            // Son konumu al
-            const lastPos = history.positions[history.positions.length - 1];
-            const lastTime = history.timestamps[history.timestamps.length - 1];
+
+            const anchorMaxAcc = this.options.speedAnchorMaxAccuracy || 0;
+            let idx = history.positions.length - 1;
+            if (anchorMaxAcc > 0) {
+                for (let i = history.positions.length - 1; i >= 0; i--) {
+                    const acc = history.accuracies[i];
+                    if (acc == null || acc <= anchorMaxAcc) { idx = i; break; }
+                }
+            }
+
+            const lastPos = history.positions[idx];
+            const lastTime = history.timestamps[idx];
+            const lastAcc = history.accuracies[idx];
+            const anchorIsBad = anchorMaxAcc > 0 && lastAcc != null && lastAcc > anchorMaxAcc;
             
             // Zaman farkını hesapla (saniye)
             const timeDiff = Math.abs(timestamp - lastTime) / 1000;
@@ -888,15 +1184,41 @@
             const maxSpeed = this.options.indoorMode 
                 ? this.options.maxIndoorSpeed 
                 : this.options.maxHumanSpeed;
+
+            // Geçmişte yalnızca kötü çıpa varsa ve yeni ölçüm belirgin biçimde (en az 2 kat)
+            // daha iyiyse, daha güvenilir ölçüme uyulur — ama yalnızca sapma kötü çıpanın
+            // kendi belirsizliğiyle açıklanabildiği sürece (aksi halde bu da bir teleport olur).
+            if (anchorIsBad && newAccuracy != null && newAccuracy * 2 <= lastAcc) {
+                const trust = this.options.speedAnchorTrustMultiplier || 3;
+                if (distance <= lastAcc * trust + maxSpeed * timeDiff) {
+                    return {
+                        valid: true,
+                        speed: speed,
+                        distance: distance,
+                        timeDiff: timeDiff,
+                        reason: 'anchor_less_accurate'
+                    };
+                }
+            }
+
+            // Konum belirsizliği toleransı: iki ölçümün hata yarıçapları bileşkesi
+            const factor = this.options.speedUncertaintyFactor != null
+                ? this.options.speedUncertaintyFactor : 1;
+            const accA = lastAcc || 0;
+            const accB = newAccuracy || 0;
+            const uncertainty = Math.sqrt(accA * accA + accB * accB) * factor;
+            const allowedDistance = maxSpeed * timeDiff + uncertainty;
             
-            if (speed > maxSpeed) {
+            if (distance > allowedDistance) {
                 return { 
                     valid: false, 
                     speed: speed,
                     distance: distance,
                     timeDiff: timeDiff,
+                    allowedDistance: allowedDistance,
                     reason: 'impossible_speed',
-                    message: `İmkansız hız: ${speed.toFixed(1)} m/s (${(speed * 3.6).toFixed(1)} km/h), max: ${maxSpeed} m/s`
+                    message: `İmkansız hız: ${speed.toFixed(1)} m/s (${(speed * 3.6).toFixed(1)} km/h), ` +
+                        `${distance.toFixed(0)}m > izinli ${allowedDistance.toFixed(0)}m`
                 };
             }
             
@@ -1048,6 +1370,277 @@
             }
         },
         
+        // Kümenin son `count` fix'i tek bir yeri mi gösteriyor? Gösteriyorsa ağırlıklı
+        // merkezini döndürür. Sıkılık eşiği accuracy ile ölçeklenir ki duran kullanıcının
+        // doğal ±20m titremesi "dağınık küme" sayılmasın.
+        _clusterConsensus: function (fixes, count, maxAccuracy, minSpanMs) {
+            if (fixes.length < count) return null;
+
+            // Pencere sondan geriye doğru büyür: `count` bir alt sınırdır, gereken süreye
+            // ulaşılamadıysa daha eski fix'ler de katılır. Sabit boyutlu pencere kullanılsaydı
+            // süre koşulu belirli örnekleme hızlarında hiç sağlanamazdı — 1 Hz'de 7 fix yalnızca
+            // 6 saniyeye yayılır, dolayısıyla "7 fix ve 7 saniye" imkânsız bir istek olurdu.
+            let size = count;
+            const last = fixes[fixes.length - 1].timestamp;
+            while (size < fixes.length &&
+                last - fixes[fixes.length - size].timestamp < (minSpanMs || 0)) size++;
+
+            const recent = fixes.slice(-size);
+
+            let accSum = 0;
+            for (const f of recent) {
+                if (f.accuracy == null || f.accuracy > maxAccuracy) return null;
+                accSum += f.accuracy;
+            }
+
+            // Anlık sıçrama değil, kararlı bir gözlem olmalı
+            const span = recent[recent.length - 1].timestamp - recent[0].timestamp;
+            if (span < (minSpanMs || 0)) return null;
+
+            // Ağırlıklı merkez (accuracy'si iyi olan fix daha çok ağırlık taşır)
+            let wSum = 0, latSum = 0, lngSum = 0;
+            for (const f of recent) {
+                const w = 1 / Math.max(1, f.accuracy);
+                wSum += w;
+                latSum += f.latitude * w;
+                lngSum += f.longitude * w;
+            }
+            const centerLat = latSum / wSum;
+            const centerLng = lngSum / wSum;
+
+            const avgAcc = accSum / recent.length;
+            const radiusLimit = Math.max(this.options.reanchorClusterRadius || 15, avgAcc * 0.75);
+            for (const f of recent) {
+                const d = L.latLng(centerLat, centerLng).distanceTo(L.latLng(f.latitude, f.longitude));
+                if (d > radiusLimit) return null;
+            }
+
+            return {
+                latitude: centerLat,
+                longitude: centerLng,
+                accuracy: avgAcc,
+                fixCount: recent.length,
+                spanMs: span,
+                radiusLimit: radiusLimit
+            };
+        },
+
+        // Reddedilen fix'leri kümeleyip "asıl hatalı olan çıpa mı?" sorusunu yanıtlar.
+        // Ardışık redler birbirini doğruluyorsa (sıkı küme + makul accuracy + yeterli süre)
+        // gelen sinyal doğru, çıpa yanlıştır → kümenin merkezi döndürülür (yeniden çıpalama).
+        //
+        // Kanıt eşiği düzeltmenin BÜYÜKLÜĞÜ ile ölçeklenir: küçük bir kayma birkaç fix ile
+        // kabul edilir, ama 100m'lik bir ışınlanma için çok daha fazla kanıt gerekir. Aksi
+        // hâlde birbirinden uzak iki multipath kümesi arasında (A↔B) salınım yaşanır ve
+        // kullanıcı ekranda tekrar tekrar ışınlanır.
+        _evaluateRejectCluster: function (position, timestamp) {
+            if (!this.options.enableConsensusReanchor) return null;
+
+            const o = this.options;
+            const cluster = this._rejectCluster;
+            const now = timestamp || Date.now();
+
+            cluster.fixes.push({
+                latitude: position.latitude,
+                longitude: position.longitude,
+                accuracy: position.accuracy,
+                timestamp: now
+            });
+
+            const minFixes = o.reanchorMinFixes || 3;
+            const farMinFixes = Math.max(minFixes, o.reanchorFarMinFixes || minFixes);
+            const overrideFixes = Math.max(farMinFixes, o.reanchorOverrideFixes || farMinFixes);
+
+            // Küme zaman ufkuyla budanır, sabit fix sayısıyla değil: konsensüs pencereleri
+            // süre üzerinden tanımlı olduğundan, örnekleme hızı ne olursa olsun en uzun
+            // pencerenin sığacağı kadar geçmiş tutulmalı. Sayı sınırı yalnızca üst sınırdır.
+            const horizon = Math.max(o.reanchorOverrideSpanMs || 0, o.reanchorFarMinSpanMs || 0,
+                o.reanchorMinSpanMs || 0) * 2 + 5000;
+            while (cluster.fixes.length > 1 &&
+                (now - cluster.fixes[0].timestamp > horizon || cluster.fixes.length > 60)) {
+                cluster.fixes.shift();
+            }
+
+            const maxAcc = o.reanchorMaxAccuracy || Infinity;
+
+            // Önce yakın kademe eşikleriyle bir merkez adayı bul; düzeltmenin ne kadar
+            // büyük olduğunu ölçmek için bir merkeze ihtiyaç var.
+            let candidate = this._clusterConsensus(cluster.fixes, minFixes, maxAcc, o.reanchorMinSpanMs);
+            if (!candidate) return null;
+
+            // Israrlı küme: aynı yer bu kadar fix ve süre boyunca doğrulanmışsa aşağıdaki
+            // yumuşak kapılar (soğuma, ping-pong, hız) aşılır. Israr, tek seferlik bir
+            // multipath sıçramasının üretemeyeceği bir kanıttır; bu kaçış yolu olmadan
+            // gerçekten yer değiştirmiş bir kullanıcı dakikalar boyunca yanlış yerde kalır.
+            const persistent = this._clusterConsensus(
+                cluster.fixes, overrideFixes,
+                Math.min(maxAcc, o.reanchorFarMaxAccuracy || maxAcc),
+                o.reanchorOverrideSpanMs);
+
+            // Soğuma: az önce çıpa değiştiyse A↔B salınımına izin verme
+            if (!persistent && now - cluster.lastReanchorAt < (o.reanchorCooldownMs || 0)) return null;
+
+            // Yeni merkez geofence dışındaysa yeniden çıpalama yapılmaz (fallback/PDR devrede kalır)
+            if (!this._isInsideGeofence(candidate.latitude, candidate.longitude).inside) return null;
+
+            // Kapıların amacı GÜVENİLEN bir gösterimi korumaktır. Henüz hiç gerçek konum
+            // gösterilmediyse korunacak bir şey yok: açılışta kapıya yapışan ilk fix'ler
+            // çıpayı zehirlediğinde düzeltme geciktirilmemeli (yoksa ilk konum saniyeler
+            // boyunca gelmez).
+            const trusted = !!this._lastRealDisplayTime;
+
+            const history = this._locationHistory;
+            if (trusted && history.positions.length) {
+                const lastIdx = history.positions.length - 1;
+                const lastPos = history.positions[lastIdx];
+                const anchorAcc = history.accuracies[lastIdx] || 0;
+                const anchorTs = history.timestamps[lastIdx] || now;
+                let drift = L.latLng(lastPos.latitude, lastPos.longitude)
+                    .distanceTo(L.latLng(candidate.latitude, candidate.longitude));
+
+                // Mevcut çıpaya çok yakınsa uğraşma (gürültü)
+                if (drift < (o.reanchorMinDistance || 0)) return null;
+
+                // ── Uzak düzeltme: daha fazla kanıt ──
+                // Eşiği aşan bir kayma için daha çok fix, daha uzun gözlem ve daha iyi
+                // accuracy istenir; küme yeterince olgunlaşmadıysa şimdilik reddedilir
+                // (ekranda son iyi konum kalır, sonraki fix'lerde tekrar denenir).
+                if ((o.reanchorMaxDistance || 0) > 0 && drift > o.reanchorMaxDistance) {
+                    if (!persistent &&
+                        now - (cluster.lastFarReanchorAt || 0) < (o.reanchorFarCooldownMs || 0)) return null;
+
+                    const farCandidate = persistent || this._clusterConsensus(
+                        cluster.fixes, farMinFixes,
+                        Math.min(maxAcc, o.reanchorFarMaxAccuracy || maxAcc),
+                        Math.max(o.reanchorMinSpanMs || 0, o.reanchorFarMinSpanMs || 0));
+                    if (!farCandidate) return null;
+                    if (!this._isInsideGeofence(farCandidate.latitude, farCandidate.longitude).inside) return null;
+
+                    candidate = farCandidate;
+                    candidate.far = true;
+                    drift = L.latLng(lastPos.latitude, lastPos.longitude)
+                        .distanceTo(L.latLng(candidate.latitude, candidate.longitude));
+                }
+
+                // ── Ping-pong bastırma ──
+                // A'dan B'ye taşındıktan sonra tekrar A'ya dönmek istemek, iki multipath
+                // kümesi arasında salınımdır: düzeltme değil savrulmadır. Ayırt edici ölçüt
+                // budur — sahada hatalı salınımlar ile meşru düzeltmeler fix sayısı, süre ve
+                // accuracy bakımından birbirinden ayrılamıyordu; ayrıldıkları tek nokta,
+                // salınımın az önce terk edilen yere geri dönmesiydi.
+                //
+                // Pencere geniş tutulur (dakikalar): aynı iki küme arasındaki gidiş-geliş
+                // saniyeler değil dakikalar boyunca sürebiliyor. Israrlı küme bu kapıyı aşar,
+                // yoksa gerçekten geri dönmüş bir kullanıcı kalıcı olarak yanlış yerde kalır.
+                const lastRe = this._lastReanchor;
+                if (!persistent && lastRe && lastRe.fromLatitude != null &&
+                    (now - lastRe.timestamp) < (o.reanchorPingPongMs || 0)) {
+                    const back = L.latLng(lastRe.fromLatitude, lastRe.fromLongitude)
+                        .distanceTo(L.latLng(candidate.latitude, candidate.longitude));
+                    if (back < (o.reanchorPingPongRadius || 0)) return null;
+                }
+
+                // ── Yürüyüş olabilirliği (varsayılan kapalı) ──
+                // "Bu sürede yürünemez" testi teoride cazip ama sahada meşru düzeltmeleri de
+                // kesiyor: yanlış çıpa da doğru çıpa da benzer hızda büyük sapma üretiyor.
+                // Ekstra sıkılık isteyen kurulumlar için bırakıldı.
+                if ((o.reanchorMaxSpeed || 0) > 0 && !persistent) {
+                    const elapsed = Math.max(0, (now - anchorTs) / 1000);
+                    const uncertainty = (o.reanchorUncertaintyFactor || 0) *
+                        Math.sqrt(anchorAcc * anchorAcc + candidate.accuracy * candidate.accuracy);
+                    if (drift > o.reanchorMaxSpeed * elapsed + uncertainty) return null;
+                }
+
+                candidate.drift = drift;
+            }
+
+            return candidate;
+        },
+
+        // Yeniden çıpalama: konum geçmişi VE filtre iç durumu yeni merkeze taşınır.
+        // Durum sıfırlanmazsa median/Kalman eski bölgeye ait değerlerle ara bir "hayalet"
+        // konum üretir, ardından ekranda büyük bir sıçrama oluşur.
+        _reanchorFilterState: function (anchor, timestamp) {
+            const now = timestamp || Date.now();
+
+            // Nereden taşındığımızı sakla: aynı yere geri dönme isteği (ping-pong) böyle tanınır
+            let fromLat = null, fromLng = null;
+            if (this._locationHistory.positions.length) {
+                const prev = this._locationHistory.positions[this._locationHistory.positions.length - 1];
+                fromLat = prev.latitude;
+                fromLng = prev.longitude;
+            } else if (this._latitude != null) {
+                fromLat = this._latitude;
+                fromLng = this._longitude;
+            }
+
+            this._locationHistory.positions = [{ latitude: anchor.latitude, longitude: anchor.longitude }];
+            this._locationHistory.timestamps = [now];
+            this._locationHistory.accuracies = [anchor.accuracy];
+
+            this._medianFilter.latHistory = [];
+            this._medianFilter.lngHistory = [];
+            this._medianFilter.accuracyHistory = [];
+            this._medianFilter.timestampHistory = [];
+
+            this._kalmanFilter.x_lat = anchor.latitude;
+            this._kalmanFilter.x_lng = anchor.longitude;
+            this._kalmanFilter.P_lat = null;
+            this._kalmanFilter.P_lng = null;
+            this._kalmanFilter.v_lat = 0;
+            this._kalmanFilter.v_lng = 0;
+            this._kalmanFilter.cvTime = null;
+
+            this._lowPassFilterInitialized = false;
+            this._lowPassFilterLat = null;
+            this._lowPassFilterLng = null;
+
+            this._weiYeState.lastFilteredPosition = null;
+            this._weiYeState.lastRawPosition = null;
+            this._weiYeState.isJumpDetected = false;
+
+            this._movementHistory.positions = [];
+            this._movementHistory.timestamps = [];
+
+            // Fallback artık eski bölgeye çekmemeli
+            this._lastGoodLocation = {
+                latitude: anchor.latitude,
+                longitude: anchor.longitude,
+                accuracy: anchor.accuracy,
+                timestamp: now,
+                confidence: 60
+            };
+            this._consecutiveBadLocations = 0;
+            this._commitFallbackState(false);
+            this._reentry.active = false;
+
+            this._rejectCluster.fixes = [];
+            this._rejectCluster.lastReanchorAt = now;
+            if (anchor.far) this._rejectCluster.lastFarReanchorAt = now;
+            this._locationStats.reanchors = (this._locationStats.reanchors || 0) + 1;
+            // Panel bir sonraki gösterimde bunu rapor eder (tek seferlik)
+            this._reanchorPending = {
+                latitude: anchor.latitude,
+                longitude: anchor.longitude,
+                accuracy: anchor.accuracy,
+                fixCount: anchor.fixCount,
+                spanMs: anchor.spanMs,
+                distance: anchor.drift != null ? anchor.drift : null,
+                far: !!anchor.far
+            };
+            this._lastReanchor = {
+                latitude: anchor.latitude,
+                longitude: anchor.longitude,
+                accuracy: anchor.accuracy,
+                fixCount: anchor.fixCount,
+                spanMs: anchor.spanMs,
+                fromLatitude: fromLat,
+                fromLongitude: fromLng,
+                far: !!anchor.far,
+                timestamp: now
+            };
+        },
+
         // Son iyi konumu kullan (fallback)
         _getLastGoodLocationFallback: function (currentPosition) {
             const lastGood = this._lastGoodLocation;
@@ -1108,6 +1701,15 @@
             return false;
         },
 
+        // Gösterim değişmedi ama fix işlendi: sessiz kalmak yerine mevcut konumu nedeniyle
+        // birlikte raporla. Aksi halde histerezis/kapı beklemeleri panelde hiç iz bırakmaz ve
+        // "konum neden donuk?" sorusu logdan yanıtlanamaz.
+        _notifyHold: function (reason) {
+            if (this._latitude == null || this._longitude == null) return;
+            this._lastRejectReason = reason;
+            this._updateMarker({ hold: true });
+        },
+
         // Histerezisi atlayarak fallback durumunu anında uygula (kesin red durumları için)
         _commitFallbackState: function (value) {
             this._isFallbackLocation = value;
@@ -1158,6 +1760,7 @@
                 position.accuracy > this.options.maxAcceptableAccuracy) {
                 
                 this._locationStats.accuracyRejections++;
+                this._consecutiveBadLocations++;
                 // Accuracy çok yüksek - reddediliyor
                 
                 // Fallback kullan
@@ -1165,6 +1768,7 @@
                     const fallback = this._getLastGoodLocationFallback(position);
                     if (fallback) {
                         // Son iyi konum kullanılıyor (accuracy rejection)
+                        fallback.rejectReason = 'accuracy';
                         return fallback;
                     }
                 }
@@ -1202,6 +1806,7 @@
                 if (this.options.enableLastGoodLocation) {
                     const fallback = this._getLastGoodLocationFallback(position);
                     if (fallback) {
+                        fallback.rejectReason = 'geofence';
                         // Son iyi konum kullanılıyor (geofence rejection)
                         return fallback;
                     }
@@ -1230,25 +1835,37 @@
             const speedResult = this._checkSpeedValidity(
                 position.latitude, 
                 position.longitude, 
-                timestamp
+                timestamp,
+                position.accuracy
             );
             
             if (!speedResult.valid) {
                 this._locationStats.speedRejections++;
-                // Hız ihlali
-                
-                // Fallback kullan
-                if (this.options.enableLastGoodLocation) {
-                    const fallback = this._getLastGoodLocationFallback(position);
-                    if (fallback) {
-                        // Son iyi konum kullanılıyor (speed rejection)
-                        return fallback;
+
+                // Redler birbirini doğruluyor mu? Doğruluyorsa hatalı olan çıpadır:
+                // konumu kümenin merkezine taşı ve filtre durumunu sıfırla, fix'i kabul et.
+                const consensus = this._evaluateRejectCluster(position, timestamp);
+                if (consensus) {
+                    this._reanchorFilterState(consensus, timestamp);
+                } else {
+                    this._consecutiveBadLocations++;
+
+                    // Fallback kullan
+                    if (this.options.enableLastGoodLocation) {
+                        const fallback = this._getLastGoodLocationFallback(position);
+                        if (fallback) {
+                            fallback.rejectReason = 'speed';
+                            fallback.rejectSpeed = speedResult.speed;
+                            return fallback;
+                        }
                     }
+
+                    // Fallback yoksa - null döndür (marker güncellenmeyecek)
+                    return null;
                 }
-                
-                // Fallback yoksa - null döndür (marker güncellenmeyecek)
-                // Konum reddedildi (speed)
-                return null;
+            } else {
+                // Kabul edilen fix red kümesini geçersiz kılar
+                if (this._rejectCluster.fixes.length) this._rejectCluster.fixes = [];
             }
             
             // ========== ADIM 4: GÜVENİLİRLİK SKORU ==========
@@ -1696,6 +2313,15 @@
             // Kötü konum sayacı sıfırla
             this._consecutiveBadLocations = 0;
 
+            // Red kümesi / yeniden çıpalama durumu sıfırla
+            this._rejectCluster = { fixes: [], lastReanchorAt: 0, lastFarReanchorAt: 0 };
+            this._reanchorPending = null;
+            this._lastReanchor = null;
+            this._displayJump = null;
+            this._lastRejectReason = null;
+            this._lastDisplayTime = 0;
+            this._lastRealDisplayTime = 0;
+
             // Açılış kapısını sıfırla — yeni oturum
             this._locateSessionStart = Date.now();
             this._coldStart = { ready: false, candidates: [] };
@@ -1885,6 +2511,8 @@
                 this._map.removeLayer(this._marker);
                 this._marker = undefined;
             }
+            this._removeCone();
+            this._isCoarseDisplay = false;
             this._latitude = undefined;
             this._longitude = undefined;
             this._accuracy = undefined;
@@ -1902,6 +2530,7 @@
             this._lastOrientationTime = 0;
             this._orientationCalibrated = false;
             this._compassUncalibratedWarned = false;
+            this._compassAccuracy = null;
             this._lastReliableHeading = undefined;
             this._inGimbalLockZone = false;
             this._fusedHeading = null;
@@ -1912,6 +2541,9 @@
         },
 
         _onLocationFound: function (event) {
+            // Görüntü sıçraması kararı için bu fix'ten ÖNCEKİ gösterim durumu
+            var wasFallbackBefore = !!this._isFallbackLocation;
+
             // GPS gidiş yönü (course) ve hızını yakala (A1/A3 için).
             // Leaflet locationfound olayı tüm sayısal coords alanlarını taşır:
             // event.heading (°, kuzeyden saat yönü) ve event.speed (m/s). Yön yalnızca
@@ -1960,6 +2592,8 @@
                     this._map.removeLayer(this._circle);
                     this._circle = undefined;
                 }
+                this._removeCone();
+                this._isCoarseDisplay = false;
 
                 if (this.options.afterDeviceMove) {
                     this.options.afterDeviceMove({
@@ -1974,10 +2608,13 @@
                         confidence: 0,
                         locationStats: this._locationStats,
                         isFallback: false,
+                        hasDisplay: false, // marker kaldırıldı: ham koordinat yalnızca teşhis için
                         isIndoorMode: this.options.indoorMode,
                         consecutiveBadLocations: this._consecutiveBadLocations,
                         altitude: this._altitude.filtered,
                         altitudeRaw: this._altitude.raw,
+                        altitudeNormalized: this._altitude.normalized,
+                        altitudeGeoid: this._altitude.geoid,
                         altitudeAccuracy: this._altitude.accuracy,
                         altitudePlatform: this._altitude.platform,
                         floor: this._altitude.floor,
@@ -2000,6 +2637,7 @@
                 // Histerezis: sınırdan tek tük dışarı sapan fix'lerde hemen fallback'e geçme;
                 // sapma kararlı hale gelene kadar son görüntülenen konum korunur
                 if (!this._updateFallbackHysteresis(true)) {
+                    this._notifyHold('geofence_hysteresis');
                     return;
                 }
                 this._isFallbackLocation = true;
@@ -2026,17 +2664,25 @@
                 return;
             }
             
-            // Geofence içinde — gerçek GPS konumu
-            // Histerezis: fallback'ten gerçek konuma dönüş de kararlılık ister;
-            // onaylanana kadar fallback görünümü korunur
-            if (!this._updateFallbackHysteresis(false)) {
-                return;
+            // Filtre donmuş son iyi konumu döndürdüyse (hız/accuracy reddi) bu konum GERÇEK
+            // değildir: geofence içinde olması onu gerçek yapmaz. Fallback olarak etiketlenir,
+            // aksi halde donmuş konum panelde "GERÇEK KONUM" gibi görünür.
+            this._lastRejectReason = filteredPosition.rejectReason || null;
+            if (filteredPosition.isFallback) {
+                this._commitFallbackState(true);
+            } else {
+                // Histerezis fallback'ten dönüşte yalnızca GÖRÜNÜMÜ bekletir; konum
+                // güncellemesini bekletmez. Aksi halde alan içindeki iyi fix'ler histerezis
+                // süresince yutulur ve marker gereksiz yere donuk kalır.
+                if (this._updateFallbackHysteresis(false)) {
+                    this._isFallbackLocation = false;
+                }
             }
-            this._isFallbackLocation = false;
 
             // Açılış kapısı: ilk GERÇEK KONUM için tutarlı/iyi accuracy'li fix'ler bekle
             // (kapıya yakın cold-start fix'inin hemen kilitlenmesini önler)
             if (!this._passColdStartGate(filteredPosition)) {
+                this._notifyHold('cold_start_gate');
                 return;
             }
 
@@ -2071,6 +2717,42 @@
                 return;
             }
 
+            // Görüntü uzayı sıçrama koruması: ham hız kontrolü ham fix'lere bakar, oysa
+            // GÖSTERİLEN konum filtre iç durumundan doğar. Ardışık iki gösterim arası büyük
+            // kayma fiziksel hareket değildir; işaretlenir ki sessizce ışınlanma olmasın.
+            this._displayJump = null;
+            if (this._latitude != null && this._longitude != null && targetLat != null && targetLng != null) {
+                var dispDist = L.latLng(this._latitude, this._longitude)
+                    .distanceTo(L.latLng(targetLat, targetLng));
+                var maxDisp = this.options.displayJumpMaxDistance;
+                if (maxDisp > 0 && dispDist > maxDisp) {
+                    var dispSec = this._lastDisplayTime ? (Date.now() - this._lastDisplayTime) / 1000 : 0;
+                    // Gösterim uzun süre tazelenmediyse (donma/fallback) büyük adım beklenen
+                    // toparlanmadır; kesintisiz takipte ise açıklanamayan bir sıçramadır.
+                    var staleMs = this._lastRealDisplayTime
+                        ? (Date.now() - this._lastRealDisplayTime)
+                        : Infinity;
+                    var isResync = wasFallbackBefore || !!this._reanchorPending ||
+                        staleMs > (this.options.displayResyncAfterMs || 0);
+                    this._displayJump = {
+                        distance: dispDist,
+                        seconds: dispSec,
+                        speed: dispSec > 0 ? dispDist / dispSec : null,
+                        reanchored: !!this._reanchorPending,
+                        resync: isResync,
+                        clamped: false
+                    };
+                    if (this.options.clampDisplayJump && !isResync) {
+                        var ratio = maxDisp / dispDist;
+                        targetLat = this._latitude + (targetLat - this._latitude) * ratio;
+                        targetLng = this._longitude + (targetLng - this._longitude) * ratio;
+                        this._displayJump.clamped = true;
+                    }
+                }
+            }
+            this._lastDisplayTime = Date.now();
+            if (!this._isFallbackLocation) this._lastRealDisplayTime = this._lastDisplayTime;
+
             // Filtrelenmiş değerleri kaydet
             this._latitude = targetLat;
             this._longitude = targetLng;
@@ -2096,6 +2778,12 @@
                     return;
                 }
                 this._compassUncalibratedWarned = false;
+                // iOS pusula belirsizliği (± derece): yön konisinin açısını besler
+                if (event.webkitCompassAccuracy !== undefined &&
+                    event.webkitCompassAccuracy !== null &&
+                    isFinite(event.webkitCompassAccuracy)) {
+                    this._compassAccuracy = event.webkitCompassAccuracy;
+                }
                 angle = event.webkitCompassHeading;
             } else {
                 // Android/Diğer: Gimbal-lock korumalı heading hesaplama
@@ -2365,16 +3053,28 @@
             // ═══ ADIM 2: PLATFORM NORMALİZASYONU (MSL'e çevir) ═══
             var mslAltitude = this._normalizeAltitudeToMSL(rawAltitude);
             this._altitude.normalized = mslAltitude;
+            // Ham ile normalize arasındaki fark loglanabilsin: geoid sabiti doğru mu,
+            // Android/iOS değerleri gerçekten eşitlenmiş mi karşılaştırılabilir olsun.
+            this._altitude.geoid = rawAltitude - mslAltitude;
             
             // ═══ ADIM 3: ANİ SIÇRAMA KONTROLÜ ═══
             if (this._altitude.filtered !== null) {
                 var altDelta = Math.abs(mslAltitude - this._altitude.filtered);
                 if (altDelta > this.options.altitudeMaxDelta) {
-                    // Ani sıçrama - muhtemelen GPS hatası, yoksay
-                    // Altitude sıçraması tespit edildi → yoksayıldı
-                    return;
+                    // Tek seferlik sıçrama GPS hatasıdır, yoksayılır. Ama sıçrama üst üste
+                    // geliyorsa yanlış olan gelen değer değil REFERANSIN KENDİSİDİR (hatalı
+                    // ilk okuma, elipsoid/MSL karışması, uzun sinyal kesintisi). Kaçış yolu
+                    // olmazsa her yeni doğru okuma reddedilir ve yükseklik ile kat oturum
+                    // boyunca donar; bu yüzden filtre yeni yüksekliğe yeniden çıpalanır.
+                    this._altitude.jumpCount++;
+                    if (this._altitude.jumpCount < this.options.altitudeReanchorFixes) return;
+                    this._altitude.medianBuffer = [];
+                    if (this._altitude.lowPassFilter && this._altitude.lowPassFilter.reset) {
+                        this._altitude.lowPassFilter.reset();
+                    }
                 }
             }
+            this._altitude.jumpCount = 0;
             
             // ═══ ADIM 4: FİLTRELEME ═══
             var filteredAltitude;
@@ -2484,11 +3184,24 @@
             return ok;
         },
 
-        // Kat tespiti
+        /**
+         * Yükseklikten kat tespiti.
+         *
+         * GPS düşey hatası (±10-30 m) kat yüksekliğinden (~3-6 m) büyük olabildiği için
+         * ham eşleme tek başına güvenilmez: sınırda duran bir okuma katı sürekli
+         * değiştirir, gösterilen plan ve "en yakın birim" sonucu titrer. Bu yüzden kat
+         * değişimi üç kapıdan birlikte geçmek zorundadır:
+         *   1. Derinlik — yeni kata sınırından `floorHysteresis` kadar içeride olunmalı
+         *   2. Mutabakat — aynı aday üst üste `floorChangeMinFixes` ölçümde görülmeli
+         *   3. Bekleme   — son kat değişiminden `floorChangeCooldownMs` geçmiş olmalı
+         */
         _detectFloor: function (altitude) {
+            var alt = this._altitude;
             var floor = null;
             var floorName = null;
-            
+            var depth = 0;      // Aday katın sınırından ne kadar içerideyiz (m)
+            var span = 0;       // Aday katın yükseklik aralığı (m)
+
             // ─── Yöntem 1: Manuel kat tanımları (öncelikli) ───
             if (this.options.floors && this.options.floors.length > 0) {
                 for (var i = 0; i < this.options.floors.length; i++) {
@@ -2496,58 +3209,71 @@
                     if (altitude >= f.minAlt && altitude < f.maxAlt) {
                         floor = f.floor;
                         floorName = f.name || ('Kat ' + f.floor);
+                        span = f.maxAlt - f.minAlt;
+                        depth = Math.min(altitude - f.minAlt, f.maxAlt - altitude);
                         break;
                     }
                 }
             }
             // ─── Yöntem 2: Otomatik hesaplama (groundFloorAltitude + floorHeight) ───
             else if (this.options.groundFloorAltitude !== null) {
-                var relativeHeight = altitude - this.options.groundFloorAltitude;
-                var rawFloor = relativeHeight / this.options.floorHeight;
+                var rawFloor = (altitude - this.options.groundFloorAltitude) / this.options.floorHeight;
                 floor = Math.round(rawFloor) + this.options.groundFloorNumber;
                 floorName = 'Kat ' + floor;
+                var expectedAlt = this.options.groundFloorAltitude +
+                    (floor - this.options.groundFloorNumber) * this.options.floorHeight;
+                span = this.options.floorHeight;
+                depth = span / 2 - Math.abs(altitude - expectedAlt);
             }
-            
+
             if (floor === null) return;
-            
-            // ─── Histerezis: Küçük dalgalanmalarda kat değişimini engelle ───
-            if (this._altitude.lastStableFloor !== null && floor !== this._altitude.lastStableFloor) {
-                // Yeni katla eski kat arasındaki altitude farkı yeterli mi?
-                var expectedAltForNewFloor;
-                if (this.options.groundFloorAltitude !== null) {
-                    expectedAltForNewFloor = this.options.groundFloorAltitude + 
-                        (floor - this.options.groundFloorNumber) * this.options.floorHeight;
-                    var distFromBoundary = Math.abs(altitude - expectedAltForNewFloor);
-                    
-                    // Kat sınırına yeterince yaklaşmadıysa kat değiştirme
-                    if (distFromBoundary > (this.options.floorHeight / 2 - this.options.floorHysteresis)) {
-                        // Histerezis eşiğini aştı → kat değiştir
-                    } else {
-                        // Sınırda salınım - önceki katı koru
-                        floor = this._altitude.lastStableFloor;
-                        floorName = 'Kat ' + floor;
-                    }
-                }
-                
-                // Minimum süre kontrolü (çok hızlı kat değişimini engelle)
-                var now = Date.now();
-                if (now - this._altitude.floorChangeTime < 3000) {
-                    // Son 3 saniyede zaten kat değişimi oldu, bekle
-                    floor = this._altitude.lastStableFloor;
-                    floorName = 'Kat ' + floor;
-                }
+
+            // İlk tespit: karşılaştıracak kararlı kat yok, doğrudan benimsenir
+            if (alt.lastStableFloor === null) {
+                this._commitFloor(floor, floorName);
+                return;
             }
-            
-            // Kat değiştiyse bildir
-            if (this._altitude.floor !== floor) {
-                var prevFloor = this._altitude.floor;
-                this._altitude.floor = floor;
-                this._altitude.floorName = floorName;
-                this._altitude.lastStableFloor = floor;
-                this._altitude.floorChangeTime = Date.now();
-                
-                // Kat değişimi bildirimi - callback'ten izlenebilir
+
+            if (floor === alt.lastStableFloor) {
+                alt.floorCandidate = null;
+                alt.floorCandidateCount = 0;
+                // Bant adı yapılandırmadan güncellenmiş olabilir
+                alt.floorName = floorName;
+                return;
             }
+
+            // ─── Kapı 1: yeni katın içine yeterince girildi mi ───
+            // Eşik aralığın çeyreğiyle sınırlanır: dar bir bantta sabit bir metre
+            // değeri istenirse hiçbir geçiş mümkün olmaz.
+            if (depth < Math.min(this.options.floorHysteresis, span / 4)) {
+                return;     // Sınırda salınım — kararlı kat korunur
+            }
+
+            // ─── Kapı 2: aynı aday üst üste kaç ölçümde görüldü ───
+            if (alt.floorCandidate === floor) {
+                alt.floorCandidateCount++;
+            } else {
+                alt.floorCandidate = floor;
+                alt.floorCandidateCount = 1;
+            }
+            if (alt.floorCandidateCount < this.options.floorChangeMinFixes) return;
+
+            // ─── Kapı 3: son değişimden beri yeterli süre geçti mi ───
+            if (Date.now() - alt.floorChangeTime < this.options.floorChangeCooldownMs) return;
+
+            this._commitFloor(floor, floorName);
+        },
+
+        // Kat geçişini onayla ve durumu sıfırla
+        _commitFloor: function (floor, floorName) {
+            var alt = this._altitude;
+            alt.floor = floor;
+            alt.floorName = floorName;
+            alt.lastStableFloor = floor;
+            alt.lastStableFloorName = floorName;
+            alt.floorChangeTime = Date.now();
+            alt.floorCandidate = null;
+            alt.floorCandidateCount = 0;
         },
         
         // Altitude verilerini sıfırla
@@ -2559,7 +3285,12 @@
             this._altitude.floor = null;
             this._altitude.floorName = null;
             this._altitude.medianBuffer = [];
+            this._altitude.jumpCount = 0;
             this._altitude.lastStableFloor = null;
+            this._altitude.lastStableFloorName = null;
+            this._altitude.floorCandidate = null;
+            this._altitude.floorCandidateCount = 0;
+            this._altitude.floorChangeTime = 0;
             this._altitude.sampleCount = 0;
             if (this._altitude.lowPassFilter && this._altitude.lowPassFilter.reset) {
                 this._altitude.lowPassFilter.reset();
@@ -2589,9 +3320,8 @@
             
             var groundAlt = this._altitude.filtered;
             this.options.groundFloorAltitude = groundAlt;
-            this._altitude.floor = this.options.groundFloorNumber;
-            this._altitude.floorName = 'Kat ' + this.options.groundFloorNumber;
-            this._altitude.lastStableFloor = this.options.groundFloorNumber;
+            this._commitFloor(this.options.groundFloorNumber,
+                'Kat ' + this.options.groundFloorNumber);
             
             // Zemin kat kalibre edildi
             return groundAlt;
@@ -3081,9 +3811,31 @@
                 }
             }
 
+            // Kaba gösterim kararı callback'ten ÖNCE alınır (log doğru modu görsün).
+            // Zoom animasyonu sırasında piksel yarıçapı geçici olarak yanıltıcıdır;
+            // karar dondurulur, animasyon bitince _onZoomEnd yeniden hesaplar.
+            if (!this._isZooming) {
+                this._isCoarseDisplay = this._computeCoarseDisplay();
+            }
+
             if (this.options.afterDeviceMove) {
+                // Yeniden çıpalama / görüntü sıçraması bilgisi yalnızca konum güncellemesinde
+                // raporlanır ve tek seferlik tüketilir (yön güncellemeleri tekrar etmesin)
+                var reanchor = null;
+                var displayJump = null;
+                if (!opts.orientationOnly && !opts.hold) {
+                    reanchor = this._reanchorPending || null;
+                    displayJump = this._displayJump || null;
+                    this._reanchorPending = null;
+                    this._displayJump = null;
+                }
                 var updateKind = opts.orientationOnly ? 'orientation'
-                    : (this._pdr.active ? 'pdr' : 'position');
+                    : (opts.hold ? 'hold'
+                        : (this._pdr.active ? 'pdr'
+                            : (reanchor ? 'reanchor'
+                                : (displayJump
+                                    ? (displayJump.resync ? 'resync' : 'teleport')
+                                    : 'position'))));
                 this.options.afterDeviceMove({
                     lat: this._latitude,
                     lng: this._longitude,
@@ -3095,6 +3847,10 @@
                     confidence: this._lastGoodLocation.confidence,
                     locationStats: this._locationStats,
                     isFallback: !!this._isFallbackLocation,
+                    rejectReason: (this._isFallbackLocation || opts.hold)
+                        ? (this._lastRejectReason || null) : null,
+                    reanchor: reanchor,
+                    displayJump: displayJump,
                     isIndoorMode: this.options.indoorMode,
                     consecutiveBadLocations: this._consecutiveBadLocations,
                     isPDR: this._pdr.active,
@@ -3102,10 +3858,14 @@
                     pdrAccuracy: this._pdr.currentAccuracy,
                     altitude: this._altitude.filtered,
                     altitudeRaw: this._altitude.raw,
+                    altitudeNormalized: this._altitude.normalized,
+                    altitudeGeoid: this._altitude.geoid,
                     altitudeAccuracy: this._altitude.accuracy,
                     altitudePlatform: this._altitude.platform,
                     floor: this._altitude.floor,
                     floorName: this._altitude.floorName,
+                    coarseDisplay: !!this._isCoarseDisplay,
+                    headingConeAngle: this._isCoarseDisplay ? this._coneAngle : null,
                     updateKind: updateKind
                 });
             }
@@ -3129,28 +3889,33 @@
 
             // Accuracy circle güncelle
             var circleColor = this._getAccuracyColor(this._accuracy);
+            var strokeColor = this.options.circleStrokeColor || circleColor;
             var cFill = this.options.circleFillOpacity;
             var cStroke = this.options.circleStrokeOpacity;
+            var cWeight = this.options.circleStrokeWeight;
+            if (cWeight == null || !isFinite(cWeight) || cWeight < 0) cWeight = 1;
 
             if (this._circle) {
                 this._circle.setLatLng([this._latitude, this._longitude]);
                 this._circle.setRadius(this._accuracy);
                 this._circle.setStyle({
                     fillColor: circleColor,
-                    color: circleColor,
+                    color: strokeColor,
                     fillOpacity: cFill,
                     opacity: cStroke,
-                    weight: 1,
+                    weight: cWeight,
+                    stroke: cWeight > 0,
                     dashArray: ''
                 });
             } else if (this.options.drawCircle) {
                 this._circle = L.circle([this._latitude, this._longitude], {
                     radius: this._accuracy,
                     fillColor: circleColor,
-                    color: circleColor,
+                    color: strokeColor,
                     fillOpacity: cFill,
                     opacity: cStroke,
-                    weight: 1,
+                    weight: cWeight,
+                    stroke: cWeight > 0,
                     dashArray: ''
                 }).addTo(this._map);
             }
@@ -3182,8 +3947,11 @@
                 this._marker.addTo(this._map);
             }
             
-            // Fallback opacity
+            // Fallback opacity / kaba modda noktayı gizleme
             this._applyMarkerFallbackStyle();
+
+            // Harita uzayındaki yön konisi (kaba modda noktanın yerini alır)
+            this._updateCone();
 
             this._lastAccuracy = this._accuracy;
         },
@@ -3192,14 +3960,121 @@
             if (!this._marker || !this._marker._icon) return;
             
             var icon = this._marker._icon;
-            
+
+            // Kaba gösterim: iOS gibi konum noktası kaldırılır, yalnızca çember + koni kalır
+            if (this._isCoarseDisplay && this.options.coarseAccuracyHideMarker) {
+                icon.style.opacity = '0';
+                return;
+            }
+
             if (this.options.fadeMarkerOnFallback && this._isFallbackLocation) {
                 icon.style.opacity = this.options.fallbackMarkerOpacity;
-                icon.style.transition = 'opacity 0.3s ease';
             } else {
                 icon.style.opacity = '1';
-                icon.style.transition = 'opacity 0.3s ease';
             }
+        },
+
+        // ════════════════════════════════════════════════════════
+        // KABA DOĞRULUK GÖSTERİMİ (iOS tarzı) — çember + yön konisi
+        // ════════════════════════════════════════════════════════
+
+        // Doğruluk çemberinin ekrandaki yarıçapı (piksel)
+        _accuracyRadiusPx: function () {
+            if (!this._map || !this._accuracy || this._latitude == null || this._longitude == null) return null;
+            try {
+                var center = this._map.latLngToLayerPoint([this._latitude, this._longitude]);
+                var edge = this._map.latLngToLayerPoint(
+                    metersOffset(this._latitude, this._longitude, this._accuracy, 90));
+                return Math.abs(edge.x - center.x);
+            } catch (e) {
+                return null;
+            }
+        },
+
+        _computeCoarseDisplay: function () {
+            return isCoarseAccuracy({
+                accuracy: this._accuracy,
+                radiusPx: this._accuracyRadiusPx(),
+                isFallback: !!this._isFallbackLocation,
+                options: this.options
+            });
+        },
+
+        // Koni katmanları çemberin üstünde, marker'ların altında kalsın
+        _conePane: function () {
+            if (!this._map) return undefined;
+            if (!this._map.getPane('simpleLocateCone')) {
+                var pane = this._map.createPane('simpleLocateCone');
+                pane.style.zIndex = 420;          // overlayPane 400 < koni < markerPane 600
+                pane.style.pointerEvents = 'none';
+            }
+            return 'simpleLocateCone';
+        },
+
+        _updateCone: function () {
+            // Harita gerçek bir Leaflet örneği değilse (başsız test/replay ortamı) çizim yapma
+            if (!this._map || typeof this._map.createPane !== 'function' ||
+                typeof L.polygon !== 'function') return;
+
+            var visible = this._isCoarseDisplay &&
+                this.options.headingCone &&
+                this._angle !== undefined && this._angle !== null &&
+                this._accuracy && this._latitude != null && this._longitude != null;
+
+            if (!visible) {
+                this._removeCone();
+                return;
+            }
+
+            var shape = headingConeShape({
+                lat: this._latitude,
+                lng: this._longitude,
+                accuracy: this._accuracy,
+                heading: this._angle,
+                headingAccuracy: this._compassAccuracy,
+                options: this.options
+            });
+            this._coneAngle = shape.angle;
+
+            var color = this.options.headingConeColor ||
+                (this._isFallbackLocation ? this.options.fallbackOrientationColor
+                    : this.options.orientationColor);
+
+            if (!this._cone) {
+                this._cone = L.polygon(shape.latlngs, {
+                    pane: this._conePane(),
+                    stroke: false,
+                    weight: 0,
+                    fillColor: color,
+                    color: color,
+                    fillOpacity: shape.fillOpacity,
+                    interactive: false,
+                    className: 'leaflet-simple-locate-cone'
+                });
+                this._cone.addTo(this._map);
+            } else {
+                this._cone.setLatLngs(shape.latlngs);
+                if (!this._map.hasLayer(this._cone)) this._cone.addTo(this._map);
+            }
+
+            // Işıma: radyal gradyan + çembere kırpma
+            var center = this._map.latLngToLayerPoint([this._latitude, this._longitude]);
+            paintHeadingCone(this._cone._path, {
+                cx: center.x,
+                cy: center.y,
+                radiusPx: this._accuracyRadiusPx(),
+                color: color,
+                id: L.Util.stamp(this)
+            });
+        },
+
+        _removeCone: function () {
+            if (this._cone && this._map && typeof this._map.hasLayer === 'function' &&
+                this._map.hasLayer(this._cone)) {
+                this._map.removeLayer(this._cone);
+            }
+            this._cone = null;
+            this._coneAngle = null;
         },
 
         _buildGeolocationIcon: function (dotColor, ringColor, shadowColor) {
@@ -3505,6 +4380,14 @@
             return distance < 5;
         }
     });
+
+    // Kaba gösterim hesaplarını dışa aç: demo/test sayfaları eklentinin birebir
+    // aynı kararını ve geometrisini kullanabilsin (kopya mantık sapması olmasın).
+    SimpleLocate.isCoarseAccuracy = isCoarseAccuracy;
+    SimpleLocate.headingConeAngle = headingConeAngle;
+    SimpleLocate.headingConeShape = headingConeShape;
+    SimpleLocate.paintHeadingCone = paintHeadingCone;
+    SimpleLocate.metersOffset = metersOffset;
 
     L.control.simpleLocate = function (options) {
         return new SimpleLocate(options);

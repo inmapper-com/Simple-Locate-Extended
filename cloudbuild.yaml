@@ -1,0 +1,100 @@
+# Cloud Build — GitHub push → build + deploy static site + logs-api
+# Does NOT recreate Cloud SQL / secrets (one-time: bash gcp/deploy.sh)
+#
+# Substitutions (trigger or CLI):
+#   _REGION          default europe-west1
+#   _BUCKET          default ${PROJECT_ID}-simple-locate
+#   _FN_NAME         default logs-api
+#   _SQL_INSTANCE    default simple-locate-db
+
+substitutions:
+  _REGION: europe-west1
+  _BUCKET: tubitak-1507-2025-simple-locate
+  _FN_NAME: logs-api
+  _SQL_INSTANCE: simple-locate-db
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # 1) Frontend / plugin build
+  - name: node:20
+    id: npm-build
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        npm ci || npm install
+        npm run build
+
+  # 2) Deploy Cloud Function (logs API)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy-function
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        PROJECT_ID="$PROJECT_ID"
+        REGION="${_REGION}"
+        FN_NAME="${_FN_NAME}"
+        SQL_INSTANCE="${_SQL_INSTANCE}"
+        SQL_CONN="$(gcloud sql instances describe "$$SQL_INSTANCE" --project="$$PROJECT_ID" --format='value(connectionName)')"
+        echo "Deploying $$FN_NAME → $$REGION (Cloud SQL: $$SQL_CONN)"
+        gcloud functions deploy "$$FN_NAME" \
+          --gen2 \
+          --project="$$PROJECT_ID" \
+          --runtime=nodejs20 \
+          --region="$$REGION" \
+          --source=./gcp/logs-api \
+          --entry-point=logsApi \
+          --trigger-http \
+          --allow-unauthenticated \
+          --set-secrets="DATABASE_URL=locate-database-url:latest,API_KEY=locate-api-key:latest" \
+          --set-env-vars="CORS_ORIGIN=*" \
+          --memory=256Mi \
+          --timeout=60s
+        gcloud run services update "$$FN_NAME" \
+          --project="$$PROJECT_ID" \
+          --region="$$REGION" \
+          --add-cloudsql-instances="$$SQL_CONN" \
+          --quiet || true
+
+  # 3) Sync static site to Cloud Storage
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: sync-static
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        BUCKET="${_BUCKET}"
+        echo "Syncing site → gs://$$BUCKET"
+        if ! gcloud storage buckets describe "gs://$$BUCKET" >/dev/null 2>&1; then
+          gcloud storage buckets create "gs://$$BUCKET" --project="$PROJECT_ID" --location="${_REGION}"
+          gcloud storage buckets update "gs://$$BUCKET" --web-main-page-suffix=index.html || true
+          gcloud storage buckets add-iam-policy-binding "gs://$$BUCKET" \
+            --member=allUsers --role=roles/storage.objectViewer || true
+        fi
+        # Core site files
+        gcloud storage cp index.html app.html log-viewer.html "gs://$$BUCKET/" || true
+        gcloud storage cp demo-colors.html "gs://$$BUCKET/" 2>/dev/null || true
+        # Kat planı SVG'leri ve hazır yapılandırma — app.html bunlar olmadan çalışmaz
+        if [[ -d demo ]]; then
+          gcloud storage rsync ./demo "gs://$$BUCKET/demo" --recursive
+        fi
+        # dist + images if present
+        if [[ -d dist ]]; then
+          gcloud storage rsync ./dist "gs://$$BUCKET/dist" --recursive
+        fi
+        if [[ -d images ]]; then
+          gcloud storage rsync ./images "gs://$$BUCKET/images" --recursive
+        fi
+        # Optional: keep src available for demos that load unminified scripts
+        if [[ -d src ]]; then
+          gcloud storage rsync ./src "gs://$$BUCKET/src" --recursive
+        fi
+        echo "Site: https://storage.googleapis.com/$$BUCKET/index.html"
+
+timeout: 1800s

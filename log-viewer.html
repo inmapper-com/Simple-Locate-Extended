@@ -73,10 +73,17 @@
         .row-item {
             padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
             cursor: pointer; background: var(--bg); font-size: 12px;
+            display: flex; gap: 8px; align-items: flex-start;
         }
+        .row-item .row-main { flex: 1; min-width: 0; }
         .row-item:hover { border-color: var(--accent); }
         .row-item.active { border-color: var(--accent); background: #1d2b45; }
         .row-item .meta { color: var(--muted); font-size: 11px; margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .row-item .del {
+            flex: 0 0 auto; padding: 4px 8px; border: 1px solid #7f1d1d; background: #450a0a;
+            color: #fca5a5; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer;
+        }
+        .row-item .del:hover { background: #7f1d1d; color: #fff; }
         .badge { padding: 1px 6px; border-radius: 5px; background: var(--panel); font-weight: 600; }
 
         .detail { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
@@ -173,12 +180,42 @@
             display: inline-block;
             flex-shrink: 0;
         }
+        .map-toolbar .sep {
+            height: 1px; background: var(--border); margin: 6px 0;
+        }
+        .map-toolbar .cfg-row {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 11px; color: var(--muted); padding: 2px 0;
+        }
+        .map-toolbar .cfg-row input[type="number"] {
+            width: 56px; padding: 3px 5px; font-size: 11px;
+        }
+        .sim-table {
+            width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px;
+        }
+        .sim-table th, .sim-table td {
+            text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--border);
+        }
+        .sim-table th { color: var(--muted); font-weight: 600; font-size: 10px; text-transform: uppercase; }
+        .sim-table .better { color: #86efac; }
+        .sim-table .worse { color: #fca5a5; }
+        .pin-badge {
+            min-width: 18px; height: 18px; padding: 0 3px; border-radius: 9px;
+            color: #fff; font: 700 9px/18px system-ui, sans-serif;
+            text-align: center; box-sizing: border-box;
+            border: 1.5px solid rgba(255,255,255,.9);
+            box-shadow: 0 0 0 1px rgba(0,0,0,.4);
+        }
 
         .log-line {
-            display: grid; grid-template-columns: 78px 70px 1fr; gap: 8px;
+            display: grid; grid-template-columns: 28px 78px 70px 1fr; gap: 8px;
             padding: 5px 14px; font-size: 12px; border-bottom: 1px solid rgba(51,65,85,.4);
             font-family: ui-monospace, Menlo, Consolas, monospace; cursor: default;
         }
+        .log-line .pin-no {
+            color: #94a3b8; font-weight: 700; font-size: 10px; text-align: right;
+        }
+        .log-line.has-geo .pin-no { color: #e2e8f0; }
         .log-line.has-geo { cursor: pointer; }
         .log-line:hover { background: var(--panel2); }
         .log-line.active-pin {
@@ -225,10 +262,11 @@
 <body>
     <header>
         <h1>SimpleLocate — Log Görüntüleyici</h1>
-        <span class="sub">JSON / gzip çöz · haritada pin · log listesi</span>
+        <span class="sub">JSON / gzip çöz · pin no · gösterge önizleme · simülasyon</span>
         <div class="tabs">
             <button class="tab active" data-tab="paste">Yapıştır</button>
-            <button class="tab" data-tab="supabase">Supabase</button>
+            <button class="tab" data-tab="cloud">Cloud Logs</button>
+            <button class="tab" data-tab="sim">Simülasyon</button>
         </div>
     </header>
 
@@ -239,19 +277,43 @@
                 <textarea id="pasteInput" placeholder='H4sIAAAA...  veya  { "stats": ..., "entries": [...] }'></textarea>
                 <button class="action" id="decodeBtn">Çöz &amp; Göster</button>
                 <div class="err-box" id="pasteErr"></div>
-                <p class="hint">Standart export JSON, CSV’den dönüştürülmüş dizi veya Supabase <b>payload_gz</b> yapıştırılabilir. Konumlar haritada pin olarak görünür.</p>
+                <p class="hint">Standart export JSON, CSV’den dönüştürülmüş dizi veya Cloud Logs <b>payload_gz</b> yapıştırılabilir. Konumlar haritada pin olarak görünür.</p>
             </div>
 
-            <div class="pane-body" id="pane-supabase" style="display:none">
-                <label>Supabase REST URL</label>
-                <input id="sbUrl" placeholder="https://xxxx.supabase.co/rest/v1/test_logs">
-                <label>API Key (SELECT yetkili)</label>
-                <input id="sbKey" placeholder="sb_publishable_... veya anon key">
+            <div class="pane-body" id="pane-cloud" style="display:none">
+                <label>Cloud Functions Logs API URL</label>
+                <input id="cloudUrl" value="https://europe-west1-tubitak-1507-2025.cloudfunctions.net/logs-api">
+                <label>API Key (x-api-key)</label>
+                <input id="cloudKey" value="locate_dev_key_change_me_01">
                 <label>Etiket filtresi (opsiyonel)</label>
-                <input id="sbLabel" placeholder="magaza-A">
+                <input id="cloudLabel" placeholder="test (boş = hepsi)">
                 <button class="action" id="fetchBtn">Son kayıtları getir</button>
-                <div class="err-box" id="sbErr"></div>
+                <div class="err-box" id="cloudErr"></div>
                 <div id="rowList" style="margin-top:12px"></div>
+                <p class="hint">Kayıtlar Cloud SQL <code>test_logs</code> tablosundan Cloud Functions üzerinden gelir.</p>
+            </div>
+
+            <div class="pane-body" id="pane-sim" style="display:none">
+                <p class="hint" style="margin-top:0">Yüklenen logun ham GPS’i <b>şu an yüklü eklenti</b> ile yeniden oynatılır. Orijinal yol (kayıt) ile simülasyon yolunu karşılaştırırsın — filtre değişikliğinin etkisini sahaya çıkmadan görürsün.</p>
+                <button class="action" id="simBtn">▶ Simüle et (güncel eklenti)</button>
+                <div class="err-box" id="simErr"></div>
+                <div id="simResult"></div>
+                <p class="hint">PDR/ivmeölçer replay edilmez. Geofence, logdaki içeride/dışarıda işaretlerinden türetilir.</p>
+                <div class="sep" style="height:1px;background:var(--border);margin:14px 0"></div>
+                <label>Seçili pin göstergesi</label>
+                <p class="hint" style="margin-top:0">Pin seçilince test sırasında görünen konum noktası + accuracy çemberi çizilir. Varsayılanlar app.html ile aynı; burada değiştirebilirsin.</p>
+                <label>Kaba eşik (m)</label>
+                <input id="indThreshold" type="number" min="5" max="80" step="1" value="25">
+                <div class="hint" style="margin-top:8px">
+                    <label style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:600;cursor:pointer">
+                        <input type="checkbox" id="indHideMarker" checked style="width:14px;height:14px;margin:0">
+                        Eşik üstünde noktayı gizle (yalnız çember)
+                    </label>
+                    <label style="display:flex;align-items:center;gap:8px;color:var(--text);font-weight:600;cursor:pointer;margin-top:8px">
+                        <input type="checkbox" id="indCone" checked style="width:14px;height:14px;margin:0">
+                        Yön konisi
+                    </label>
+                </div>
             </div>
         </div>
 
@@ -269,6 +331,12 @@
                         <label><input type="checkbox" data-layer="reject" checked> <span class="dot" style="background:#ef4444"></span> Red</label>
                         <label><input type="checkbox" data-layer="jump" checked> <span class="dot" style="background:#f59e0b"></span> Jump</label>
                         <label><input type="checkbox" data-layer="path" checked> <span class="dot" style="background:#22d3ee;border-radius:2px"></span> Yol</label>
+                        <label><input type="checkbox" data-layer="sim" checked> <span class="dot" style="background:#f97316;border-radius:2px"></span> Simülasyon</label>
+                        <label><input type="checkbox" id="showIstPlan"> <span class="dot" style="background:#f472b6;border-radius:2px"></span> IST kat planı</label>
+                        <label id="istFloorWrap" style="display:none;margin-top:4px">
+                            <span style="font-size:10px;color:var(--muted);min-width:28px">Kat</span>
+                            <select id="istFloorSelect" style="flex:1;min-width:0;padding:3px 6px;font-size:11px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px"></select>
+                        </label>
                     </div>
                 </div>
                 <div class="split-resizer" id="splitResizer" title="Sürükleyerek boyutlandır"></div>
@@ -282,12 +350,64 @@
     </main>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="src/low-pass-filter.js?v=20260814b"></script>
+    <script src="src/leaflet-simple-locate.js?v=20260814b"></script>
+    <script src="src/simple-locate-replay.js?v=20260814b"></script>
+    <script src="demo/plans/ist-floorplans.js"></script>
     <script>
         var current = null;
         var map = null;
         var layerGroups = {};
         var pathLine = null;
+        var jumpLine = null;
+        var simPathLine = null;
+        var previewGroup = null;
         var pinByEntryIdx = {};
+        var geoByEntryIdx = {};
+        var lastSelectedIdx = null;
+        var istPlanLayer = null;
+        var istPlanVisible = false;
+        var istPlanFloor = 0;
+        var IST = window.IST_FLOOR_PLANS;
+        var istFloorPlans = IST ? IST.build() : null;
+        var Replay = window.SimpleLocateReplay;
+
+        var INDICATOR = {
+            markerColor: '#1a73e8',
+            markerRingColor: '#ffffff',
+            orientationColor: '#0077ff',
+            circleColor: '#8ba2bb',
+            circleFillOpacity: 0.2,
+            circleStrokeColor: '#ffffff',
+            circleStrokeWeight: 4,
+            circleStrokeOpacity: 0.85,
+            fallbackMarkerColor: '#4c9bf0',
+            fallbackOrientationColor: '#9e9e9e',
+            coarseAccuracyThreshold: 25,
+            coarseAccuracyHideMarker: true,
+            headingCone: true
+        };
+
+        function loadIndicatorCfg() {
+            try {
+                var s = localStorage.getItem('sl-viewer-indicator');
+                if (!s) return;
+                var o = JSON.parse(s);
+                if (o.coarseAccuracyThreshold != null) INDICATOR.coarseAccuracyThreshold = +o.coarseAccuracyThreshold;
+                if (o.coarseAccuracyHideMarker != null) INDICATOR.coarseAccuracyHideMarker = !!o.coarseAccuracyHideMarker;
+                if (o.headingCone != null) INDICATOR.headingCone = !!o.headingCone;
+            } catch (e) {}
+        }
+        function saveIndicatorCfg() {
+            try {
+                localStorage.setItem('sl-viewer-indicator', JSON.stringify({
+                    coarseAccuracyThreshold: INDICATOR.coarseAccuracyThreshold,
+                    coarseAccuracyHideMarker: INDICATOR.coarseAccuracyHideMarker,
+                    headingCone: INDICATOR.headingCone
+                }));
+            } catch (e) {}
+        }
+        loadIndicatorCfg();
 
         function initSplitResizer() {
             var split = document.querySelector('.split');
@@ -353,23 +473,67 @@
 
         function initMap() {
             if (map) return;
-            map = L.map('map', { zoomControl: true, maxZoom: 22 }).setView([41.0, 29.0], 6);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 22,
-                maxNativeZoom: 19,
-                attribution: '&copy; OpenStreetMap'
+            map = L.map('map', { zoomControl: true, maxZoom: 22 }).setView([41.2625, 28.7427], 16);
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 22, maxNativeZoom: 19, attribution: 'Esri World Imagery'
             }).addTo(map);
             ['real', 'raw', 'pdr', 'reject', 'jump'].forEach(function (k) {
                 layerGroups[k] = L.layerGroup().addTo(map);
             });
             pathLine = L.polyline([], { color: '#22d3ee', weight: 3, opacity: 0.75 }).addTo(map);
+            jumpLine = L.polyline([], {
+                color: '#f59e0b', weight: 3, opacity: 0.9, dashArray: '6,7'
+            }).addTo(map);
+            simPathLine = L.polyline([], { color: '#f97316', weight: 3, opacity: 0.85 }).addTo(map);
+            layerGroups.sim = L.layerGroup().addTo(map);
+            previewGroup = L.layerGroup().addTo(map);
+
+            if (istFloorPlans) {
+                var sel = document.getElementById('istFloorSelect');
+                istFloorPlans.floors.forEach(function (f) {
+                    var o = document.createElement('option');
+                    o.value = String(f.floor);
+                    o.textContent = f.name;
+                    sel.appendChild(o);
+                });
+                sel.value = '0';
+                sel.addEventListener('change', function () {
+                    istPlanFloor = parseFloat(sel.value);
+                    updateIstPlanOverlay();
+                });
+            }
+
+            document.getElementById('showIstPlan').addEventListener('change', function (e) {
+                istPlanVisible = e.target.checked;
+                document.getElementById('istFloorWrap').style.display = istPlanVisible ? 'flex' : 'none';
+                updateIstPlanOverlay();
+            });
+
+            map.on('zoomend', function () {
+                if (lastSelectedIdx != null) showIndicatorFor(lastSelectedIdx);
+            });
 
             document.querySelectorAll('#mapLegend input[data-layer]').forEach(function (cb) {
                 cb.addEventListener('change', function () {
                     var key = cb.getAttribute('data-layer');
                     if (key === 'path') {
-                        if (cb.checked) { if (!map.hasLayer(pathLine)) pathLine.addTo(map); }
-                        else { map.removeLayer(pathLine); }
+                        if (cb.checked) {
+                            if (!map.hasLayer(pathLine)) pathLine.addTo(map);
+                            if (!map.hasLayer(jumpLine)) jumpLine.addTo(map);
+                        } else {
+                            map.removeLayer(pathLine);
+                            map.removeLayer(jumpLine);
+                        }
+                        return;
+                    }
+                    if (key === 'sim') {
+                        if (cb.checked) {
+                            if (simPathLine && !map.hasLayer(simPathLine)) simPathLine.addTo(map);
+                            if (layerGroups.sim) layerGroups.sim.addTo(map);
+                        } else {
+                            if (simPathLine) map.removeLayer(simPathLine);
+                            if (layerGroups.sim) map.removeLayer(layerGroups.sim);
+                        }
                         return;
                     }
                     if (!layerGroups[key]) return;
@@ -377,6 +541,37 @@
                     else map.removeLayer(layerGroups[key]);
                 });
             });
+        }
+
+        function istFloorDef(floor) {
+            if (!istFloorPlans) return null;
+            for (var i = 0; i < istFloorPlans.floors.length; i++) {
+                if (istFloorPlans.floors[i].floor === floor) return istFloorPlans.floors[i];
+            }
+            return null;
+        }
+
+        function updateIstPlanOverlay() {
+            if (!map) return;
+            if (istPlanLayer) {
+                map.removeLayer(istPlanLayer);
+                istPlanLayer = null;
+            }
+            if (!istPlanVisible || !istFloorPlans) return;
+            var def = istFloorDef(istPlanFloor);
+            if (!def) return;
+            istPlanLayer = L.imageOverlay(def.svg,
+                [[def.bounds.north, def.bounds.west], [def.bounds.south, def.bounds.east]],
+                { opacity: 0.65, interactive: false });
+            istPlanLayer.addTo(map);
+        }
+
+        function guessFloorFromEntries(entries) {
+            for (var i = entries.length - 1; i >= 0; i--) {
+                var d = entries[i].data || {};
+                if (d.floor != null && isFinite(d.floor)) return d.floor;
+            }
+            return 0;
         }
 
         async function ungzipBase64(b64) {
@@ -466,24 +661,28 @@
             })[kind] || '#94a3b8';
         }
 
-        function makeIcon(kind, isFirst, isLast) {
+        function makeIcon(kind, isFirst, isLast, pinNo) {
             var c = pinColor(kind);
-            var size = (isFirst || isLast) ? 14 : 10;
-            var border = isFirst ? '#fff' : (isLast ? '#fde68a' : 'rgba(255,255,255,.85)');
+            var label = pinNo != null ? String(pinNo) : '';
+            var w = label.length > 2 ? 22 : 18;
             return L.divIcon({
                 className: '',
-                iconSize: [size, size],
-                iconAnchor: [size / 2, size / 2],
-                html: '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:50%;' +
-                    'background:' + c + ';border:2px solid ' + border + ';' +
-                    'box-shadow:0 0 0 1px rgba(0,0,0,.35)"></div>'
+                iconSize: [w, 18],
+                iconAnchor: [w / 2, 9],
+                html: '<div class="pin-badge" style="background:' + c + ';min-width:' + w + 'px">' +
+                    (label || (isFirst ? 'A' : (isLast ? 'Z' : ''))) + '</div>'
             });
         }
 
         function clearMap() {
             Object.keys(layerGroups).forEach(function (k) { layerGroups[k].clearLayers(); });
             if (pathLine) pathLine.setLatLngs([]);
+            if (jumpLine) jumpLine.setLatLngs([]);
+            if (simPathLine) simPathLine.setLatLngs([]);
+            if (previewGroup) previewGroup.clearLayers();
             pinByEntryIdx = {};
+            geoByEntryIdx = {};
+            lastSelectedIdx = null;
         }
 
         function renderMap(entries) {
@@ -491,7 +690,12 @@
             clearMap();
 
             var bounds = [];
-            var pathPts = [];
+            // Yürüyüş parçaları düz, ışınlanma/toparlanma adımları kesikli çizilir:
+            // 60m'lik bir filtre düzeltmesi haritada "koşmuş gibi" görünmesin
+            var walkSegments = [];
+            var jumpSegments = [];
+            var currentSegment = [];
+            var lastPathPt = null;
             var counts = { real: 0, raw: 0, pdr: 0, reject: 0, jump: 0 };
 
             var geoEntries = [];
@@ -503,41 +707,65 @@
                 if (lat == null || lng == null || !isFinite(lat) || !isFinite(lng)) continue;
                 var kind = classifyPoint(e);
                 if (!kind) kind = 'raw';
-                geoEntries.push({ idx: i, e: e, lat: +lat, lng: +lng, kind: kind });
+                geoEntries.push({ idx: i, e: e, lat: +lat, lng: +lng, kind: kind, pinNo: 0 });
             }
 
             geoEntries.forEach(function (g, gi) {
+                g.pinNo = gi + 1;
                 counts[g.kind] = (counts[g.kind] || 0) + 1;
                 var isFirst = gi === 0;
                 var isLast = gi === geoEntries.length - 1;
                 var acc = g.e.data && g.e.data.accuracy != null ? Number(g.e.data.accuracy).toFixed(1) + 'm' : '—';
                 var popup =
-                    '<b>#' + esc(g.e.seq) + ' · ' + esc(g.kind) + '</b><br>' +
+                    '<b>Pin ' + (gi + 1) + ' · #' + esc(g.e.seq) + ' · ' + esc(g.kind) + '</b><br>' +
                     esc(fmtTime(g.e.t)) + '<br>' +
                     esc((g.e.message || '').slice(0, 120)) + '<br>' +
                     g.lat.toFixed(6) + ', ' + g.lng.toFixed(6) + '<br>' +
                     'acc ' + acc;
 
                 var marker = L.marker([g.lat, g.lng], {
-                    icon: makeIcon(g.kind, isFirst, isLast),
-                    title: '#' + g.e.seq + ' ' + g.kind
+                    icon: makeIcon(g.kind, isFirst, isLast, gi + 1),
+                    title: '#' + (gi + 1) + ' seq ' + g.e.seq + ' ' + g.kind,
+                    zIndexOffset: isLast ? 500 : 0
                 }).bindPopup(popup);
 
                 marker.on('click', function () { highlightLogLine(g.idx, true); });
                 layerGroups[g.kind].addLayer(marker);
                 pinByEntryIdx[g.idx] = marker;
+                geoByEntryIdx[g.idx] = g;
                 bounds.push([g.lat, g.lng]);
 
                 if (g.kind === 'real' || g.kind === 'pdr') {
-                    pathPts.push([g.lat, g.lng]);
+                    var pt = [g.lat, g.lng];
+                    var uk = (g.e.data && g.e.data.updateKind) || '';
+                    var isJumpStep = uk === 'reanchor' || uk === 'resync' || uk === 'teleport';
+                    // updateKind taşımayan eski loglarda mesafeden çıkarım yapılır
+                    if (!isJumpStep && lastPathPt) {
+                        isJumpStep = L.latLng(lastPathPt).distanceTo(L.latLng(pt)) > 25;
+                    }
+                    if (lastPathPt && isJumpStep) {
+                        if (currentSegment.length >= 2) walkSegments.push(currentSegment);
+                        jumpSegments.push([lastPathPt, pt]);
+                        currentSegment = [pt];
+                    } else {
+                        currentSegment.push(pt);
+                    }
+                    lastPathPt = pt;
                 }
             });
 
-            if (pathPts.length >= 2) pathLine.setLatLngs(pathPts);
+            if (currentSegment.length >= 2) walkSegments.push(currentSegment);
+            pathLine.setLatLngs(walkSegments);
+            jumpLine.setLatLngs(jumpSegments);
 
             if (bounds.length) {
                 map.fitBounds(bounds, { padding: [36, 36], maxZoom: 18 });
             }
+
+            istPlanFloor = guessFloorFromEntries(entries);
+            var istSel = document.getElementById('istFloorSelect');
+            if (istSel) istSel.value = String(istPlanFloor);
+            updateIstPlanOverlay();
 
             setTimeout(function () { map.invalidateSize(); }, 50);
             return { pinCount: geoEntries.length, counts: counts };
@@ -551,10 +779,98 @@
                 el.classList.add('active-pin');
                 el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             }
+            lastSelectedIdx = idx;
+            showIndicatorFor(idx);
             if (!fromMap && pinByEntryIdx[idx]) {
                 var m = pinByEntryIdx[idx];
                 map.panTo(m.getLatLng());
                 m.openPopup();
+            }
+        }
+
+        function indicatorOptions() {
+            return {
+                coarseAccuracyMode: true,
+                coarseAccuracyThreshold: INDICATOR.coarseAccuracyThreshold,
+                coarseAccuracyHideMarker: INDICATOR.coarseAccuracyHideMarker,
+                headingCone: INDICATOR.headingCone
+            };
+        }
+
+        function showIndicatorFor(idx) {
+            if (!previewGroup || !map) return;
+            previewGroup.clearLayers();
+            var g = geoByEntryIdx[idx];
+            if (!g) return;
+            var d = (g.e && g.e.data) || {};
+            var acc = d.accuracy != null && isFinite(d.accuracy) ? +d.accuracy : 25;
+            var isFb = g.kind === 'pdr' || g.kind === 'reject' || /fallback|SON İYİ/i.test(g.e.message || '');
+            var SL = (window.L && L.Control && L.Control.SimpleLocate) ? L.Control.SimpleLocate : null;
+            var coarse = false;
+            if (SL && typeof SL.isCoarseAccuracy === 'function') {
+                try {
+                    var center = map.latLngToLayerPoint([g.lat, g.lng]);
+                    var edge = map.latLngToLayerPoint(
+                        SL.metersOffset ? SL.metersOffset(g.lat, g.lng, acc, 90) : [g.lat, g.lng]);
+                    var radiusPx = Math.abs(edge.x - center.x);
+                    coarse = SL.isCoarseAccuracy({
+                        accuracy: acc, radiusPx: radiusPx, isFallback: isFb, options: indicatorOptions()
+                    });
+                } catch (e) {
+                    coarse = acc >= INDICATOR.coarseAccuracyThreshold;
+                }
+            } else {
+                coarse = acc >= INDICATOR.coarseAccuracyThreshold;
+            }
+
+            var circleColor = INDICATOR.circleColor;
+            L.circle([g.lat, g.lng], {
+                radius: acc,
+                color: INDICATOR.circleStrokeColor,
+                fillColor: circleColor,
+                weight: INDICATOR.circleStrokeWeight,
+                opacity: INDICATOR.circleStrokeOpacity,
+                fillOpacity: INDICATOR.circleFillOpacity,
+                interactive: false
+            }).addTo(previewGroup);
+
+            var heading = d.angle != null ? +d.angle : (d.heading != null ? +d.heading : null);
+            if (coarse && INDICATOR.headingCone && heading != null && isFinite(heading) && SL && SL.headingConeShape) {
+                var shape = SL.headingConeShape({
+                    lat: g.lat, lng: g.lng, accuracy: acc, heading: heading,
+                    headingAccuracy: d.headingAccuracy, options: indicatorOptions()
+                });
+                L.polygon(shape.latlngs, {
+                    color: INDICATOR.orientationColor,
+                    fillColor: INDICATOR.orientationColor,
+                    weight: 1, opacity: 0.9, fillOpacity: 0.35, interactive: false
+                }).addTo(previewGroup);
+            }
+
+            var hideDot = coarse && INDICATOR.coarseAccuracyHideMarker;
+            if (!hideDot) {
+                var dot = isFb ? INDICATOR.fallbackMarkerColor : INDICATOR.markerColor;
+                var arrow = isFb ? INDICATOR.fallbackOrientationColor : INDICATOR.orientationColor;
+                var html;
+                if (heading != null && isFinite(heading) && !coarse) {
+                    html = '<div style="width:48px;height:48px;transform:rotate(' + heading + 'deg)">' +
+                        '<svg width="48" height="48" viewBox="-24 -24 48 48">' +
+                        '<path fill="' + arrow + '" opacity=".7" d="M -8,-22 H 8 L 3,0 H -3 z"/>' +
+                        '<circle fill="' + INDICATOR.markerRingColor + '" r="8"/>' +
+                        '<circle fill="' + dot + '" r="5"/></svg></div>';
+                    L.marker([g.lat, g.lng], {
+                        icon: L.divIcon({ className: '', html: html, iconSize: [48, 48], iconAnchor: [24, 24] }),
+                        interactive: false, zIndexOffset: 2000
+                    }).addTo(previewGroup);
+                } else {
+                    html = '<svg width="24" height="24" viewBox="-12 -12 24 24">' +
+                        '<circle fill="' + INDICATOR.markerRingColor + '" r="10"/>' +
+                        '<circle fill="' + dot + '" r="6"/></svg>';
+                    L.marker([g.lat, g.lng], {
+                        icon: L.divIcon({ className: '', html: html, iconSize: [24, 24], iconAnchor: [12, 12] }),
+                        interactive: false, zIndexOffset: 2000
+                    }).addTo(previewGroup);
+                }
             }
         }
 
@@ -570,6 +886,14 @@
             var bits = [];
             if (meta && meta.label) bits.push('<span class="stat">Etiket: <b>' + esc(meta.label) + '</b></span>');
             if (meta && meta.platform) bits.push('<span class="stat">Platform: <b>' + esc(meta.platform) + '</b></span>');
+            var sess = parsed.session;
+            if (sess && sess.device) {
+                bits.push('<span class="stat">Cihaz: <b>' + esc(sess.device.device || sess.device.platform || '') + '</b></span>');
+            }
+            if (sess && sess.filters && sess.filters.indoorMode != null) {
+                bits.push('<span class="stat">Mod: <b>' + (sess.filters.indoorMode ? 'indoor' : 'outdoor') + '</b></span>');
+            }
+            if (stats.gpsHz != null) bits.push('<span class="stat">GPS: <b>' + stats.gpsHz + ' Hz</b></span>');
             if (meta && meta.created_at) bits.push('<span class="stat">' + esc(new Date(meta.created_at).toLocaleString()) + '</span>');
             bits.push('<span class="stat">Olay: <b>' + entries.length + '</b></span>');
             bits.push('<span class="stat">Pin: <b>' + mapInfo.pinCount + '</b></span>');
@@ -579,6 +903,7 @@
             if (stats.pdrSteps != null) bits.push('<span class="stat">PDR: <b>' + stats.pdrSteps + '</b></span>');
             bits.push('<span class="spacer"></span>');
             bits.push('<button id="fitBtn">⌖ Sığdır</button>');
+            bits.push('<button id="simHeadBtn">▶ Simüle et</button>');
             bits.push('<button id="dlBtn">⬇ JSON indir</button>');
             head.innerHTML = bits.join(' ');
             document.getElementById('dlBtn').onclick = downloadCurrent;
@@ -590,6 +915,8 @@
                 });
                 if (b.length) map.fitBounds(b, { padding: [36, 36], maxZoom: 18 });
             };
+            var simHead = document.getElementById('simHeadBtn');
+            if (simHead) simHead.onclick = runSimulation;
 
             var list = document.getElementById('logList');
             if (!entries.length) {
@@ -598,8 +925,10 @@
                 var html = '';
                 for (var i = 0; i < entries.length; i++) {
                     var e = entries[i];
-                    var hasGeo = !!(e.data && (e.data.lat != null || e.data.baseLat != null));
+                    var g = geoByEntryIdx[i];
+                    var hasGeo = !!g;
                     html += '<div class="log-line lvl-' + esc(e.level) + (hasGeo ? ' has-geo' : '') + '" data-idx="' + i + '">' +
+                        '<span class="pin-no">' + (g ? g.pinNo : '') + '</span>' +
                         '<span class="t">' + esc(fmtTime(e.t)) + '</span>' +
                         '<span class="cat cat-' + esc(e.category) + '">' + esc(e.category) + '</span>' +
                         '<span class="msg">' + esc(e.message) + '</span>' +
@@ -616,6 +945,136 @@
             document.getElementById('toggleJson').style.display = 'block';
             document.getElementById('rawJson').textContent = JSON.stringify(parsed, null, 2);
         }
+
+        function sessionHint(log) {
+            var s = log && log.session;
+            if (!s) return '';
+            var bits = [];
+            if (s.device) {
+                bits.push((s.device.device || s.device.platform || '?') +
+                    (s.device.screen ? ' · ' + s.device.screen.w + '×' + s.device.screen.h : ''));
+            }
+            if (s.filters) {
+                var f = s.filters;
+                if (f.enableConsensusReanchor != null) bits.push('reanchor ' + (f.enableConsensusReanchor ? 'açık' : 'kapalı'));
+                if (f.enableDeadReckoning != null) bits.push('PDR ' + (f.enableDeadReckoning ? 'açık' : 'kapalı'));
+                if (f.maxAcceptableAccuracy != null) bits.push('max acc ' + f.maxAcceptableAccuracy + 'm');
+            }
+            if (!bits.length) return '';
+            return '<p class="hint">Kayıt oturumu: ' + bits.map(function (b) { return esc(b); }).join(' · ') + '</p>';
+        }
+
+        function fmtNum(v, d) {
+            if (v == null || !isFinite(v)) return '—';
+            return Number(v).toFixed(d == null ? 1 : d);
+        }
+
+        function cmpClass(orig, sim, lowerBetter) {
+            if (orig == null || sim == null || !isFinite(orig) || !isFinite(sim)) return '';
+            if (Math.abs(orig - sim) < 1e-6) return '';
+            var better = lowerBetter ? (sim < orig) : (sim > orig);
+            return better ? 'better' : 'worse';
+        }
+
+        function runSimulation() {
+            var errEl = document.getElementById('simErr');
+            var outEl = document.getElementById('simResult');
+            errEl.textContent = '';
+            if (!current || !current.parsed) {
+                errEl.textContent = 'Önce bir log yükle (Yapıştır veya Cloud).';
+                return;
+            }
+            if (!Replay) {
+                errEl.textContent = 'Replay modülü yüklenemedi.';
+                return;
+            }
+            try {
+                var log = current.parsed;
+                var fixes = Replay.extractRawFixes(log);
+                if (!fixes.length) {
+                    errEl.textContent = 'Logda "Ham GPS sinyali" kaydı yok — simülasyon ham fix ister.';
+                    return;
+                }
+                var polygon = Replay.derivePolygonFromLog(fixes);
+                var plat = (current.meta && current.meta.platform) ||
+                    (log.session && log.session.device && log.session.device.platform) || '';
+                var isIOS = String(plat).toLowerCase() === 'ios';
+                var result = Replay.replay(fixes, { polygon: polygon, isIOS: isIOS, geoFromLog: true });
+                var sim = Replay.analyze(fixes, result.events);
+                var orig = Replay.extractOriginalPath(log);
+
+                if (layerGroups.sim) layerGroups.sim.clearLayers();
+                var simLatLngs = [];
+                for (var i = 0; i < sim.displayed.length; i++) {
+                    var p = sim.displayed[i];
+                    if (p.lat == null) continue;
+                    simLatLngs.push([p.lat, p.lng]);
+                    L.circleMarker([p.lat, p.lng], {
+                        radius: 5, color: '#f97316', fillColor: '#f97316',
+                        fillOpacity: 0.9, weight: 1, interactive: false
+                    }).addTo(layerGroups.sim);
+                }
+                simPathLine.setLatLngs(simLatLngs);
+                for (var r = 0; r < sim.reanchors.length; r++) {
+                    var ra = sim.reanchors[r];
+                    if (ra.lat == null) continue;
+                    L.circleMarker([ra.lat, ra.lng], {
+                        radius: 8, color: '#fb7185', fillColor: '#fb7185',
+                        fillOpacity: 0.3, weight: 2, interactive: false
+                    }).bindTooltip('reanchor seq ' + ra.fixSeq, { permanent: false }).addTo(layerGroups.sim);
+                }
+
+                function row(label, ov, sv, lowerBetter, digits) {
+                    return '<tr><td>' + label + '</td><td>' + fmtNum(ov, digits) + '</td>' +
+                        '<td class="' + cmpClass(ov, sv, lowerBetter) + '">' + fmtNum(sv, digits) + '</td></tr>';
+                }
+                outEl.innerHTML =
+                    '<table class="sim-table"><thead><tr><th></th><th>Orijinal log</th><th>Güncel eklenti</th></tr></thead><tbody>' +
+                    row('Ham GPS', fixes.length, fixes.length, false, 0) +
+                    row('İlk gerçek (sn)', orig.firstRealAfterSec, sim.firstRealAfterSec, true, 1) +
+                    row('Gösterilen nokta', orig.path.length, sim.displayed.length, false, 0) +
+                    row('Yeniden çıpa', orig.reanchors, sim.reanchors.length, true, 0) +
+                    row('Max sıçrama (m)', orig.maxJump, sim.bigJumps.maxDist, true, 1) +
+                    row('>25 m sıçrama', orig.jumpOver25, sim.bigJumps.over25, true, 0) +
+                    row('Hatalı donma (fix)', orig.staleFixes, sim.worstStale.fixes, true, 0) +
+                    row('Red / yutulan', null, sim.counts.reject + sim.counts.silentNoCallback, true, 0) +
+                    '</tbody></table>' +
+                    sessionHint(log) +
+                    '<p class="hint">Turuncu yol = simülasyon. Pembe halka = yeniden çıpalama. Yeşil hücre = yeni kod daha iyi.</p>';
+
+                document.querySelectorAll('.tab').forEach(function (t) { t.classList.remove('active'); });
+                var simTab = document.querySelector('.tab[data-tab="sim"]');
+                if (simTab) simTab.classList.add('active');
+                document.getElementById('pane-paste').style.display = 'none';
+                document.getElementById('pane-cloud').style.display = 'none';
+                document.getElementById('pane-sim').style.display = 'block';
+            } catch (e) {
+                errEl.textContent = 'Simülasyon hatası: ' + (e && e.message ? e.message : e);
+            }
+        }
+
+        document.getElementById('simBtn').onclick = runSimulation;
+
+        (function bindIndicatorCfg() {
+            var th = document.getElementById('indThreshold');
+            var hide = document.getElementById('indHideMarker');
+            var cone = document.getElementById('indCone');
+            if (th) { th.value = INDICATOR.coarseAccuracyThreshold; th.onchange = function () {
+                INDICATOR.coarseAccuracyThreshold = parseFloat(th.value) || 25;
+                saveIndicatorCfg();
+                if (lastSelectedIdx != null) showIndicatorFor(lastSelectedIdx);
+            }; }
+            if (hide) { hide.checked = INDICATOR.coarseAccuracyHideMarker; hide.onchange = function () {
+                INDICATOR.coarseAccuracyHideMarker = hide.checked;
+                saveIndicatorCfg();
+                if (lastSelectedIdx != null) showIndicatorFor(lastSelectedIdx);
+            }; }
+            if (cone) { cone.checked = INDICATOR.headingCone; cone.onchange = function () {
+                INDICATOR.headingCone = cone.checked;
+                saveIndicatorCfg();
+                if (lastSelectedIdx != null) showIndicatorFor(lastSelectedIdx);
+            }; }
+        })();
 
         function downloadCurrent() {
             if (!current) return;
@@ -642,54 +1101,106 @@
             }
         };
 
+        function shortDevice(ua) {
+            if (!ua) return '—';
+            var s = String(ua);
+            if (/iPhone/i.test(s)) return 'iPhone';
+            if (/iPad/i.test(s)) return 'iPad';
+            var m = s.match(/Android[^;]*;\s*([^);]+)/i);
+            if (m) {
+                return m[1].replace(/\s*Build\/.*$/i, '').trim().slice(0, 48) || 'Android';
+            }
+            if (/Windows/i.test(s)) return 'Windows';
+            if (/Mac OS/i.test(s)) return 'Mac';
+            return s.slice(0, 42);
+        }
+
         document.getElementById('fetchBtn').onclick = async function () {
-            var url = document.getElementById('sbUrl').value.trim();
-            var key = document.getElementById('sbKey').value.trim();
-            var label = document.getElementById('sbLabel').value.trim();
-            var errEl = document.getElementById('sbErr');
+            var url = document.getElementById('cloudUrl').value.trim().replace(/\/$/, '');
+            var key = document.getElementById('cloudKey').value.trim();
+            var label = document.getElementById('cloudLabel').value.trim();
+            var errEl = document.getElementById('cloudErr');
             var listEl = document.getElementById('rowList');
             errEl.textContent = ''; listEl.innerHTML = '';
-            if (!url || !key) { errEl.textContent = 'URL ve key gerekli.'; return; }
+            if (!url || !key) { errEl.textContent = 'URL ve API key gerekli.'; return; }
 
-            var q = url + '?select=id,created_at,session_id,label,platform,reason,entry_count,duration_ms,compressed,stats,payload_gz,payload' +
-                '&order=created_at.desc&limit=50';
-            if (label) q += '&label=eq.' + encodeURIComponent(label);
+            var q = url + '?limit=50';
+            if (label) q += '&label=' + encodeURIComponent(label);
             try {
-                var res = await fetch(q, { headers: { apikey: key, Authorization: 'Bearer ' + key } });
+                var res = await fetch(q, { headers: { 'x-api-key': key } });
                 if (!res.ok) {
-                    errEl.textContent = 'HTTP ' + res.status + ' — SELECT izni yok olabilir.';
+                    errEl.textContent = 'HTTP ' + res.status + ' — API key veya Function URL kontrol et.';
                     return;
                 }
                 var rows = await res.json();
-                if (!rows.length) { listEl.innerHTML = '<div class="empty">Kayıt yok.</div>'; return; }
-                var html = '';
-                for (var i = 0; i < rows.length; i++) {
-                    var r = rows[i];
-                    html += '<div class="row-item" data-idx="' + i + '">' +
-                        '<div><b>' + esc(r.label || '(etiketsiz)') + '</b> · ' + esc(r.platform || '?') + '</div>' +
-                        '<div class="meta">' +
-                        '<span class="badge">' + (r.entry_count || 0) + ' olay</span>' +
-                        '<span>' + esc(new Date(r.created_at).toLocaleString()) + '</span>' +
-                        '<span>' + esc(r.reason || '') + '</span>' +
-                        '</div></div>';
+                if (!Array.isArray(rows)) {
+                    errEl.textContent = 'Beklenmeyen yanıt (dizi değil).';
+                    return;
                 }
-                listEl.innerHTML = html;
-                var items = listEl.querySelectorAll('.row-item');
-                items.forEach(function (el) {
-                    el.onclick = async function () {
-                        items.forEach(function (x) { x.classList.remove('active'); });
-                        el.classList.add('active');
-                        var r = rows[+el.dataset.idx];
-                        try {
-                            var jsonText = r.compressed && r.payload_gz ? await ungzipBase64(r.payload_gz) : r.payload;
-                            var parsed = JSON.parse(jsonText);
-                            renderLog(parsed, r);
-                        } catch (e) {
-                            document.getElementById('logList').innerHTML =
-                                '<div class="empty">Çözülemedi: ' + esc(e.message) + '</div>';
+                if (!rows.length) { listEl.innerHTML = '<div class="empty">Kayıt yok.</div>'; return; }
+
+                function renderRows() {
+                    if (!rows.length) { listEl.innerHTML = '<div class="empty">Kayıt yok.</div>'; return; }
+                    var html = '';
+                    for (var i = 0; i < rows.length; i++) {
+                        var r = rows[i];
+                        html += '<div class="row-item" data-idx="' + i + '" data-id="' + esc(String(r.id)) + '">' +
+                            '<div class="row-main">' +
+                            '<div><b>' + esc(r.label || '(etiketsiz)') + '</b> · ' + esc(r.platform || '?') +
+                            ' · ' + esc(shortDevice(r.device)) + '</div>' +
+                            '<div class="meta">' +
+                            '<span class="badge">' + (r.entry_count || 0) + ' olay</span>' +
+                            '<span>' + esc(new Date(r.created_at).toLocaleString()) + '</span>' +
+                            '<span>' + esc(r.reason || '') + '</span>' +
+                            '<span>#' + esc(String(r.id)) + '</span>' +
+                            '</div></div>' +
+                            '<button type="button" class="del" title="Sil">Sil</button>' +
+                            '</div>';
+                    }
+                    listEl.innerHTML = html;
+                    var items = listEl.querySelectorAll('.row-item');
+                    items.forEach(function (el) {
+                        el.onclick = async function (ev) {
+                            if (ev.target && ev.target.classList.contains('del')) return;
+                            items.forEach(function (x) { x.classList.remove('active'); });
+                            el.classList.add('active');
+                            var r = rows[+el.dataset.idx];
+                            try {
+                                var jsonText = r.compressed && r.payload_gz ? await ungzipBase64(r.payload_gz) : r.payload;
+                                var parsed = JSON.parse(jsonText);
+                                renderLog(parsed, r);
+                            } catch (e) {
+                                document.getElementById('logList').innerHTML =
+                                    '<div class="empty">Çözülemedi: ' + esc(e.message) + '</div>';
+                            }
+                        };
+                        var delBtn = el.querySelector('.del');
+                        if (delBtn) {
+                            delBtn.onclick = async function (ev) {
+                                ev.stopPropagation();
+                                var id = el.dataset.id;
+                                if (!id || !confirm('Kayıt #' + id + ' silinsin mi?')) return;
+                                try {
+                                    var dres = await fetch(url + '?id=' + encodeURIComponent(id), {
+                                        method: 'DELETE',
+                                        headers: { 'x-api-key': key }
+                                    });
+                                    if (!dres.ok) {
+                                        errEl.textContent = 'Silinemedi: HTTP ' + dres.status;
+                                        return;
+                                    }
+                                    var idx = +el.dataset.idx;
+                                    rows.splice(idx, 1);
+                                    renderRows();
+                                } catch (e) {
+                                    errEl.textContent = 'Silme hatası: ' + (e && e.message ? e.message : e);
+                                }
+                            };
                         }
-                    };
-                });
+                    });
+                }
+
+                renderRows();
             } catch (e) {
                 errEl.textContent = 'Ağ hatası: ' + (e && e.message ? e.message : e);
             }
@@ -701,7 +1212,8 @@
                 tab.classList.add('active');
                 var which = tab.dataset.tab;
                 document.getElementById('pane-paste').style.display = which === 'paste' ? 'block' : 'none';
-                document.getElementById('pane-supabase').style.display = which === 'supabase' ? 'block' : 'none';
+                document.getElementById('pane-cloud').style.display = which === 'cloud' ? 'block' : 'none';
+                document.getElementById('pane-sim').style.display = which === 'sim' ? 'block' : 'none';
             };
         });
 

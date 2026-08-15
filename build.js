@@ -16,11 +16,14 @@ const { minify } = require('terser');
 const SRC_DIR = path.join(__dirname, 'src');
 const DIST_DIR = path.join(__dirname, 'dist');
 
-// Yükleme sırası önemli: low-pass → core → extended → panel
+// Yükleme sırası önemli: low-pass → core → extended → floorplan → panel
+// (floorplan, core prototipine metot eklediği için panelden önce gelmeli;
+//  panel ayarlar sekmesini kurarken bu metotların varlığına bakar)
 const FILES = [
     'low-pass-filter.js',
     'leaflet-simple-locate.js',
     'simple-locate-extended.js',
+    'simple-locate-floorplan.js',
     'simple-locate-panel.js'
 ];
 

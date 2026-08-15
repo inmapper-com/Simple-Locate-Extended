@@ -5,6 +5,9 @@ node_modules/
 *.log
 npm-debug.log*
 
+# A/B replay için git'ten çıkarılan geçici karşılaştırma kaynağı
+tools/.baseline-src/
+
 # OS / editor
 .DS_Store
 Thumbs.db

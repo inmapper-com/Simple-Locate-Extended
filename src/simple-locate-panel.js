@@ -60,6 +60,12 @@
         '.slp-switch input:checked + .slp-track::before{transform:translateX(18px);}' +
         '.slp-range{width:120px;accent-color:#3b82f6;}' +
         '.slp-num{width:64px;padding:4px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;text-align:right;}' +
+        '.slp-text{flex:1;min-width:0;padding:5px 8px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;}' +
+        '.slp-select{min-width:110px;max-width:62%;padding:4px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;background:#fff;}' +
+        '.slp-upload-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#eff6ff;border-bottom:1px solid #bfdbfe;}' +
+        '.slp-upload-bar label{font-size:11px;font-weight:700;color:#1e40af;white-space:nowrap;flex:0 0 auto;}' +
+        '.slp-upload-bar .slp-text{flex:1 1 auto;min-width:120px;width:100%;padding:6px 8px;' +
+        'border:1px solid #93c5fd;border-radius:5px;font-size:12px;background:#fff;color:#111827;}' +
         '.slp-status{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;background:#fff;border-bottom:1px solid #e5e7eb;}' +
         '.slp-badge{padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;color:#fff;}' +
         '.slp-kv{display:flex;flex-direction:column;gap:2px;min-width:70px;}' +
@@ -179,6 +185,11 @@
         return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) +
             '.' + (d.getMilliseconds() + '').padStart(3, '0');
     }
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"]/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+        });
+    }
     function fmtDur(ms) {
         if (ms == null) return '--';
         if (ms < 1000) return ms + 'ms';
@@ -262,6 +273,20 @@
         } catch (e) { /* fallback */ }
         return 'sess-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
     }
+    function shortDeviceName(ua) {
+        var s = String(ua || '');
+        if (!s) return 'unknown';
+        if (/iPhone/i.test(s)) return 'iPhone';
+        if (/iPad/i.test(s)) return 'iPad';
+        var m = s.match(/Android[^;]*;\s*([^);]+)/i);
+        if (m) {
+            var name = m[1].replace(/\s*Build\/.*$/i, '').trim();
+            return (name || 'Android').slice(0, 80);
+        }
+        if (/Windows/i.test(s)) return 'Windows';
+        if (/Mac OS/i.test(s)) return 'Mac';
+        return s.slice(0, 80);
+    }
     // UTF-8 metni gzip'leyip base64 döndür (CompressionStream yoksa null → sıkıştırmasız gönderilir)
     function gzipBase64(text) {
         if (typeof CompressionStream !== 'function' || typeof Blob !== 'function') {
@@ -283,12 +308,38 @@
             return Promise.resolve(null);
         }
     }
-    function formatAltitudeParts(altitude, floorName, floor) {
+    function formatAltitudeParts(altitude, floorName, floor, rawAltitude) {
         var parts = [];
-        if (altitude != null && isFinite(altitude)) parts.push('yük ' + num(altitude, 1) + 'm');
+        if (altitude != null && isFinite(altitude)) {
+            var alt = 'yük ' + num(altitude, 1) + 'm';
+            // Android'de ham değerden geoid ondülasyonu çıkarılır; karşılaştırma için
+            // eşitlenmemiş ham yüksekliği de yaz (iOS'ta fark yoksa tekrar etmesin)
+            if (rawAltitude != null && isFinite(rawAltitude) &&
+                Math.abs(rawAltitude - altitude) >= 0.5) {
+                alt += ' (ham ' + num(rawAltitude, 1) + 'm)';
+            }
+            parts.push(alt);
+        }
         var fl = formatFloorLabel(floorName, floor);
         if (fl) parts.push(fl);
         return parts;
+    }
+
+    // Yükseklik alanlarını log verisine tek yerden ekler: filtrelenmiş, MSL'e
+    // normalize edilmiş ve HAM (ondülasyon uygulanmamış) değer birlikte tutulur ki
+    // platformlar arası eşitlemenin doğruluğu sonradan karşılaştırılabilsin.
+    function altitudeLogData(state, payload, extra) {
+        var pick = function (key) {
+            var v = payload ? payload[key] : null;
+            return (v != null && isFinite(v)) ? v : state[key];
+        };
+        var data = extra || {};
+        data.altitude = pick('altitude');
+        data.altitudeRaw = pick('altitudeRaw');
+        data.altitudeNormalized = pick('altitudeNormalized');
+        data.altitudeGeoid = pick('altitudeGeoid');
+        data.altitudePlatform = (payload && payload.altitudePlatform) || state.altitudePlatform;
+        return data;
     }
 
     // ============================================================
@@ -310,6 +361,10 @@
             geofenceInside: null,
             geofenceSince: Date.now(),
             altitude: null,        // son filtrelenmiş yükseklik (m, MSL)
+            altitudeRaw: null,     // platformdan gelen ham yükseklik (ondülasyon uygulanmamış)
+            altitudeNormalized: null, // MSL'e çevrilmiş (filtrelenmemiş) yükseklik
+            altitudeGeoid: null,   // ham değerden çıkarılan geoid ondülasyonu (iOS'ta 0)
+            altitudePlatform: null, // 'ios' | 'android'
             floor: null,           // son tespit edilen kat
             floorName: null        // son kat adı
         };
@@ -331,6 +386,9 @@
             pdrSteps: 0,
             pdrBlocked: 0,
             jumps: 0,
+            reanchors: 0,
+            displayJumps: 0,
+            holds: 0,
             drSessions: 0,
             drTotalMs: 0,
             modeDurations: { real: 0, fallback: 0, pdr: 0, rejected: 0 }
@@ -342,7 +400,35 @@
         this._lastPosKey = null;
         this._lastAngle = null;
         this._jumpActive = false; // isJump bayrağı yeni ham fix gelene kadar yapışık kalır; sadece yükselen kenarda logla
+        this._lastHoldLog = 0;    // donma logları saniyede bir tekrarlamasın
+        this._holdRun = 0;        // ardışık donma sayısı
+        this._lastCoarse = false; // kaba gösterim (nokta gizli) durumu — geçişte loglanır
+        this.sessionMeta = null;
+        this._gps = { lastT: null, dts: [], lastHz: null, meanHz: null };
+        this._envBound = false;
     }
+
+    function distMeters(lat1, lng1, lat2, lng2) {
+        if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+        var R = 6371000;
+        var toRad = function (x) { return (x * Math.PI) / 180; };
+        var dLat = toRad(lat2 - lat1);
+        var dLng = toRad(lng2 - lng1);
+        var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+    }
+
+    // Görüntülenen konumun neden tazelenmediğini insan diline çevirir
+    var HOLD_REASONS = {
+        speed: 'aşırı hız (sıçrama)',
+        accuracy: 'düşük doğruluk',
+        geofence: 'alan dışı (geofence)',
+        geofence_hysteresis: 'alan sınırında kararsızlık',
+        fallback_hysteresis: 'gerçek konuma dönüş kararlılık bekliyor',
+        cold_start_gate: 'açılış kapısı (tutarlı fix bekleniyor)'
+    };
 
     LocateLogger.prototype._posKey = function (payload) {
         if (!payload || payload.lat == null || payload.lng == null) return null;
@@ -393,6 +479,7 @@
             geofenceRejections: s.geofenceRejections || 0,
             accuracyRejections: s.accuracyRejections || 0,
             speedRejections: s.speedRejections || 0,
+            reanchors: s.reanchors || 0,
             totalLocations: s.totalLocations || 0
         };
     };
@@ -405,6 +492,107 @@
         for (var i = 0; i < this.listeners.length; i++) {
             try { this.listeners[i](); } catch (e) {}
         }
+    };
+
+    var FILTER_SNAPSHOT_KEYS = [
+        'indoorMode', 'advancedFiltering', 'enableDeadReckoning', 'enableAltitude',
+        'enableFloorDetection', 'enableLastGoodLocation', 'enableConsensusReanchor',
+        'maxAcceptableAccuracy', 'maxIndoorSpeed', 'coarseAccuracyMode',
+        'coarseAccuracyThreshold', 'coarseAccuracyHideMarker',
+        'reanchorMinFixes', 'reanchorMinSpanMs', 'reanchorMaxDistance',
+        'reanchorFarMinFixes', 'reanchorFarMinSpanMs', 'reanchorFarCooldownMs',
+        'reanchorPingPongMs', 'reanchorPingPongRadius',
+        'reanchorOverrideFixes', 'reanchorOverrideSpanMs', 'reanchorMaxSpeed',
+        'displayJumpMaxDistance', 'clampDisplayJump', 'geoidUndulation',
+        'pdrStepLength', 'pdrStepThreshold', 'lowPassFilterTau',
+        'medianWindowSize', 'kalmanProcessNoise', 'kalmanMeasurementNoise'
+    ];
+
+    function collectDeviceInfo() {
+        var nav = typeof navigator !== 'undefined' ? navigator : {};
+        var scr = typeof screen !== 'undefined' ? screen : {};
+        var conn = nav.connection || nav.mozConnection || nav.webkitConnection;
+        var ua = nav.userAgent || '';
+        return {
+            ua: ua.slice(0, 240),
+            device: shortDeviceName(ua),
+            platform: /Android/i.test(ua) ? 'android'
+                : (/iPhone|iPad|iPod/i.test(ua) ? 'ios' : 'other'),
+            language: nav.language || null,
+            languages: Array.isArray(nav.languages) ? nav.languages.slice(0, 4) : null,
+            hardwareConcurrency: nav.hardwareConcurrency || null,
+            maxTouchPoints: nav.maxTouchPoints || 0,
+            vendor: (nav.vendor || '').slice(0, 80),
+            screen: {
+                w: scr.width || null, h: scr.height || null,
+                availW: scr.availWidth || null, availH: scr.availHeight || null,
+                dpr: (typeof window !== 'undefined' && window.devicePixelRatio) || null
+            },
+            viewport: (typeof window !== 'undefined')
+                ? { w: window.innerWidth, h: window.innerHeight } : null,
+            connection: conn ? {
+                type: conn.type || null,
+                effectiveType: conn.effectiveType || null,
+                downlink: conn.downlink != null ? conn.downlink : null,
+                rtt: conn.rtt != null ? conn.rtt : null
+            } : null,
+            href: (typeof location !== 'undefined' && location.href)
+                ? String(location.href).split('#')[0].slice(0, 200) : null
+        };
+    }
+
+    function snapshotFilterOptions(ctrl) {
+        var o = (ctrl && ctrl.options) || {};
+        var out = {};
+        for (var i = 0; i < FILTER_SNAPSHOT_KEYS.length; i++) {
+            var k = FILTER_SNAPSHOT_KEYS[i];
+            if (o[k] != null) out[k] = o[k];
+        }
+        return out;
+    }
+
+    LocateLogger.prototype._bindEnvListeners = function () {
+        if (this._envBound) return;
+        this._envBound = true;
+        var self = this;
+        if (typeof document !== 'undefined' && document.addEventListener) {
+            document.addEventListener('visibilitychange', function () {
+                self.log('system', 'info',
+                    document.hidden ? 'Sayfa arka plana alındı' : 'Sayfa öne geldi',
+                    { hidden: !!document.hidden });
+            });
+        }
+        try {
+            if (typeof navigator !== 'undefined' && navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query({ name: 'geolocation' }).then(function (p) {
+                    self.log('system', 'info', 'Konum izni: ' + p.state, { permission: p.state });
+                    p.onchange = function () {
+                        self.log('system', 'warn', 'Konum izni değişti: ' + p.state, { permission: p.state });
+                    };
+                }).catch(function () {});
+            }
+        } catch (e) {}
+    };
+
+    LocateLogger.prototype.noteSessionStart = function () {
+        var device = collectDeviceInfo();
+        var filters = snapshotFilterOptions(this.ctrl);
+        var o = (this.ctrl && this.ctrl.options) || {};
+        this.sessionMeta = {
+            startedAt: new Date().toISOString(),
+            device: device,
+            filters: filters,
+            watch: {
+                enableHighAccuracy: true,
+                maximumAge: 0,
+                indoorMode: !!o.indoorMode
+            }
+        };
+        this._gps = { lastT: null, dts: [], lastHz: null, meanHz: null };
+        this._bindEnvListeners();
+        this.log('system', 'info',
+            'Oturum başladı · ' + (device.device || '?') + ' · ' + (device.platform || '?'),
+            { device: device, filters: filters, watch: this.sessionMeta.watch });
     };
 
     LocateLogger.prototype.log = function (category, level, message, data) {
@@ -436,6 +624,25 @@
         this.stats.rawFixes++;
         this._lastRaw = raw;
 
+        var now = raw.t || Date.now();
+        var dtMs = null, hz = null, meanHz = null;
+        if (this._gps.lastT != null) {
+            dtMs = now - this._gps.lastT;
+            if (dtMs > 0 && dtMs < 30000) {
+                hz = 1000 / dtMs;
+                this._gps.dts.push(dtMs);
+                if (this._gps.dts.length > 20) this._gps.dts.shift();
+                var sum = 0;
+                for (var i = 0; i < this._gps.dts.length; i++) sum += this._gps.dts[i];
+                meanHz = 1000 / (sum / this._gps.dts.length);
+            }
+        }
+        this._gps.lastT = now;
+        this._gps.lastHz = hz;
+        this._gps.meanHz = meanHz;
+        this.stats.gpsHz = meanHz != null ? Math.round(meanHz * 10) / 10 : null;
+        this.stats.gpsHzLast = hz != null ? Math.round(hz * 10) / 10 : null;
+
         // Geofence durumunu HAM sinyale göre belirle (gerçek iç/dış durumu)
         var inside = null;
         if (this.ctrl && typeof this.ctrl._isInsideGeofence === 'function' &&
@@ -443,9 +650,9 @@
             try { inside = this.ctrl._isInsideGeofence(raw.lat, raw.lng).inside; } catch (e) {}
         }
         if (inside !== null && inside !== this.state.geofenceInside) {
-            var now = Date.now();
+            var gnow = Date.now();
             if (this.state.geofenceInside !== null) {
-                var gd = now - this.state.geofenceSince;
+                var gd = gnow - this.state.geofenceSince;
                 this.log('geofence', inside ? 'success' : 'warn',
                     inside ? 'Alana GİRİLDİ — sinyal geri geldi (dışarıda ' + fmtDur(gd) + ' kalındı)'
                            : 'Alandan ÇIKILDI — sinyal kayboldu (içeride ' + fmtDur(gd) + ' kalındı)',
@@ -456,12 +663,23 @@
                     { inside: inside });
             }
             this.state.geofenceInside = inside;
-            this.state.geofenceSince = now;
+            this.state.geofenceSince = gnow;
         }
 
+        var hzPart = hz != null ? ' · ' + hz.toFixed(1) + ' Hz' : '';
         this.log('location', 'info',
-            'Ham GPS sinyali' + (inside === false ? ' (alan dışı)' : ''),
-            { lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy, geofenceInside: inside });
+            'Ham GPS sinyali' + (inside === false ? ' (alan dışı)' : '') + hzPart,
+            {
+                lat: raw.lat, lng: raw.lng, accuracy: raw.accuracy,
+                geofenceInside: inside,
+                dtMs: dtMs, hz: hz != null ? Math.round(hz * 10) / 10 : null,
+                meanHz: meanHz != null ? Math.round(meanHz * 10) / 10 : null,
+                heading: raw.heading != null ? raw.heading : null,
+                speed: raw.speed != null ? raw.speed : null,
+                altitude: raw.altitude != null ? raw.altitude : null,
+                altitudeAccuracy: raw.altitudeAccuracy != null ? raw.altitudeAccuracy : null,
+                headingAccuracy: raw.headingAccuracy != null ? raw.headingAccuracy : null
+            });
     };
 
     // PDR sinyal teşhisi (saniyede bir) — adım sayılmama nedenini gösterir
@@ -538,6 +756,12 @@
 
         // Yükseklik/kat bilgisini her güncellemede yakala (canlı durumda güncel kalsın)
         if (payload.altitude != null && isFinite(payload.altitude)) this.state.altitude = payload.altitude;
+        if (payload.altitudeRaw != null && isFinite(payload.altitudeRaw)) this.state.altitudeRaw = payload.altitudeRaw;
+        if (payload.altitudeNormalized != null && isFinite(payload.altitudeNormalized)) {
+            this.state.altitudeNormalized = payload.altitudeNormalized;
+        }
+        if (payload.altitudeGeoid != null && isFinite(payload.altitudeGeoid)) this.state.altitudeGeoid = payload.altitudeGeoid;
+        if (payload.altitudePlatform) this.state.altitudePlatform = payload.altitudePlatform;
         if (payload.floor != null) this.state.floor = payload.floor;
         if (payload.floorName != null) this.state.floorName = payload.floorName;
 
@@ -551,25 +775,48 @@
             else if (cur.accuracyRejections > prev.accuracyRejections) { reason = 'düşük doğruluk'; this.stats.rejAccuracy++; }
             else if (cur.speedRejections > prev.speedRejections) { reason = 'aşırı hız (sıçrama)'; this.stats.rejSpeed++; }
             if (payload.locationError) reason = 'GPS hatası: ' + payload.locationError.message;
-            var rejParts = formatAltitudeParts(this.state.altitude, this.state.floorName, this.state.floor);
+            var rejParts = formatAltitudeParts(this.state.altitude, this.state.floorName,
+                this.state.floor, this.state.altitudeRaw);
             var rejSuffix = rejParts.length ? ' · ' + rejParts.join(' · ') : '';
             this.log('reject', payload.locationError ? 'error' : 'warn',
                 'Ham GPS reddedildi — ' + reason + rejSuffix,
-                { lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy, reason: reason });
+                altitudeLogData(this.state, payload,
+                    { lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy, reason: reason }));
             this._prevCoreStats = cur;
 
             var displayMode = this._resolveDisplayMode(payload);
             if (ctrl && ctrl._pdr && ctrl._pdr.active) {
                 displayMode = 'pdr';
-            } else if (payload.lat != null && payload.lng != null && displayMode !== 'real') {
-                displayMode = 'fallback';
-            } else if (payload.lat == null || payload.lng == null) {
+            } else if (payload.hasDisplay === false || payload.lat == null || payload.lng == null) {
+                // Marker kaldırıldı; payload'daki koordinat yalnızca teşhis amaçlı ham fix
                 displayMode = 'rejected';
+            } else if (displayMode !== 'real') {
+                displayMode = 'fallback';
             }
             this._applyModeChange(displayMode, now);
             this._notify();
             return;
         }
+
+        // ----- Gösterim donduruldu (fix işlendi ama ekrandaki konum tazelenmedi) -----
+        // Bu olaylar eskiden hiç loglanmıyordu: konum sessizce donuyor, logda hiçbir iz
+        // kalmıyordu. Sebep + süre yazılır, saniyelik tekrarı bastırmak için debounce edilir.
+        if (payload.updateKind === 'hold') {
+            this.stats.holds++;
+            this._holdRun++;
+            this._applyModeChange(this._resolveDisplayMode(payload), now);
+            if (now - this._lastHoldLog >= 2500) {
+                this._lastHoldLog = now;
+                var holdWhy = HOLD_REASONS[payload.rejectReason] || payload.rejectReason || 'bilinmiyor';
+                this.log('filter', 'warn',
+                    'Gösterim donduruldu — ' + holdWhy + ' · ' + this._holdRun + ' fix',
+                    { lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy,
+                      reason: payload.rejectReason, holdRun: this._holdRun });
+            }
+            this._notify();
+            return;
+        }
+        this._holdRun = 0;
 
         // ----- Yön güncellemesi (konum değişmedi — log gürültüsünü kes) -----
         if (orientationOnly) {
@@ -598,34 +845,95 @@
             this._jumpActive = false;
         }
 
+        // Yeniden çıpalama: red kümesi konsensüsü çıpanın yanlış olduğunu gösterdi
+        if (payload.reanchor) {
+            this.stats.reanchors++;
+            var ra = payload.reanchor;
+            this.log('filter', 'success',
+                'Yeniden çıpalandı — ' + ra.fixCount + ' fix konsensüsü (' +
+                (ra.spanMs / 1000).toFixed(1) + 's, ±' + num(ra.accuracy, 0) + 'm)' +
+                (ra.distance != null ? ' · ' + num(ra.distance, 0) + 'm sapma' : '') +
+                (ra.far ? ' [uzak]' : ''),
+                { lat: ra.latitude, lng: ra.longitude, accuracy: ra.accuracy,
+                  fixCount: ra.fixCount, spanMs: ra.spanMs,
+                  distance: ra.distance, far: !!ra.far });
+        }
+
+        // Görüntü uzayında büyük adım: ışınlanma mı, donma sonrası toparlanma mı, sınırlandı mı
+        if (payload.displayJump) {
+            this.stats.displayJumps++;
+            var dj = payload.displayJump;
+            var djKind = dj.reanchored ? 'yeniden çıpalama'
+                : (dj.resync ? 'donma sonrası toparlanma'
+                    : (dj.clamped ? 'sınırlandı' : 'ışınlanma'));
+            this.log('filter', dj.clamped || !dj.resync ? 'warn' : 'info',
+                'Ekran sıçraması (' + djKind + ') — ' + num(dj.distance, 0) + 'm' +
+                (dj.speed != null ? ' · ' + num(dj.speed, 1) + ' m/s' : ''),
+                { lat: payload.lat, lng: payload.lng, distance: dj.distance,
+                  speed: dj.speed, clamped: !!dj.clamped, resync: !!dj.resync,
+                  reanchored: !!dj.reanchored });
+        }
+
         var mode = this._resolveDisplayMode(payload);
         this._applyModeChange(mode, now);
 
         if (mode === 'fallback') this.stats.fallbackUpdates++;
 
+        // Kaba gösterim geçişi: nokta gizlendi / geri geldi (görsel davranış logda iz bırakır)
+        if (!!payload.coarseDisplay !== !!this._lastCoarse) {
+            this._lastCoarse = !!payload.coarseDisplay;
+            this.log('location', 'info',
+                this._lastCoarse
+                    ? ('Kaba gösterim — nokta gizlendi, çember ±' + num(payload.accuracy, 0) + 'm' +
+                        (payload.headingConeAngle ? ' · yön konisi ' + Math.round(payload.headingConeAngle) + '°' : ''))
+                    : 'Kesin gösterim — konum noktası yeniden görünür',
+                { accuracy: payload.accuracy, coarseDisplay: this._lastCoarse,
+                  headingConeAngle: payload.headingConeAngle });
+        }
+
         var parts = [];
         parts.push('acc ' + num(payload.accuracy, 1) + 'm');
         if (payload.confidence != null) parts.push('güven %' + num(payload.confidence, 0));
         var altVal = (payload.altitude != null && isFinite(payload.altitude)) ? payload.altitude : this.state.altitude;
+        var altRaw = (payload.altitudeRaw != null && isFinite(payload.altitudeRaw))
+            ? payload.altitudeRaw : this.state.altitudeRaw;
         var flName = payload.floorName != null ? payload.floorName : this.state.floorName;
         var flNum = payload.floor != null ? payload.floor : this.state.floor;
-        parts = parts.concat(formatAltitudeParts(altVal, flName, flNum));
+        parts = parts.concat(formatAltitudeParts(altVal, flName, flNum, altRaw));
         if (payload.angle != null) parts.push(num(payload.angle, 0) + '°');
         if (payload.pdrStepCount != null && payload.isPDR) parts.push('adım ' + payload.pdrStepCount);
 
         var mlabel = (MODE_INFO[mode] || MODE_INFO.idle).label;
         var lvl = mode === 'real' ? 'success' : 'info';
         var gfHint = inside === false && mode !== 'real' ? ' · ham sinyal dışarıda' : '';
+        // Donmuş/geri çekilmiş gösterimde nedeni mesaja yaz (eskiden hiç görünmüyordu)
+        if (mode === 'fallback' && payload.rejectReason) {
+            gfHint += ' · sebep: ' + (HOLD_REASONS[payload.rejectReason] || payload.rejectReason);
+        }
+
+        var rawOffsetM = null;
+        if (this._lastRaw && this._lastRaw.lat != null && payload.lat != null) {
+            rawOffsetM = distMeters(this._lastRaw.lat, this._lastRaw.lng, payload.lat, payload.lng);
+            if (rawOffsetM != null) rawOffsetM = Math.round(rawOffsetM * 10) / 10;
+        }
 
         this.log('location', lvl,
             mlabel + ' güncellendi · ' + parts.join(' · ') + gfHint,
-            {
+            altitudeLogData(this.state, payload, {
                 lat: payload.lat, lng: payload.lng, accuracy: payload.accuracy,
                 confidence: payload.confidence, mode: mode, geofenceInside: inside,
                 floor: payload.floor, floorName: payload.floorName, angle: payload.angle,
-                altitude: payload.altitude, isPDR: payload.isPDR, pdrStepCount: payload.pdrStepCount,
-                updateKind: payload.updateKind
-            });
+                isPDR: payload.isPDR, pdrStepCount: payload.pdrStepCount,
+                coarseDisplay: !!payload.coarseDisplay,
+                headingConeAngle: payload.headingConeAngle != null ? Math.round(payload.headingConeAngle) : null,
+                updateKind: payload.updateKind,
+                gpsHz: this.stats.gpsHzLast != null ? this.stats.gpsHzLast : null,
+                rejectReason: payload.rejectReason || null,
+                isFallback: !!payload.isFallback,
+                isJump: !!payload.isJump,
+                rawOffsetM: rawOffsetM,
+                rawAccuracy: this._lastRaw ? this._lastRaw.accuracy : null
+            }));
 
         this._lastPosKey = this._posKey(payload);
         this._lastAngle = payload.angle;
@@ -644,8 +952,13 @@
             drFor: this.drSession ? now - this.drSession.start : 0,
             drSteps: this.drSession ? this.drSession.steps : 0,
             altitude: this.state.altitude,
+            altitudeRaw: this.state.altitudeRaw,
+            altitudeGeoid: this.state.altitudeGeoid,
+            altitudePlatform: this.state.altitudePlatform,
             floor: this.state.floor,
-            floorName: this.state.floorName
+            floorName: this.state.floorName,
+            nearestUnit: (this.ctrl && typeof this.ctrl.getNearestUnit === 'function')
+                ? this.ctrl.getNearestUnit() : null
         };
     };
 
@@ -655,8 +968,16 @@
         if (this.drSession) {
             stats.drTotalMs += Date.now() - this.drSession.start;
         }
+        var session = this.sessionMeta ? Object.assign({}, this.sessionMeta) : {};
+        session.exportedAt = new Date().toISOString();
+        if (session.startedAt) {
+            var t0 = Date.parse(session.startedAt);
+            if (isFinite(t0)) session.durationMs = Date.now() - t0;
+        }
+        session.coreStats = this._snapshotCoreStats();
         return JSON.stringify({
-            exportedAt: new Date().toISOString(),
+            exportedAt: session.exportedAt,
+            session: session,
             stats: stats,
             entries: this.entries
         }, null, 2);
@@ -715,7 +1036,9 @@
         var self = this;
         this._tick = setInterval(function () {
             self._renderFloatStatus();
-            if (self.open && self.activeTab === 'logs') self._renderLiveStatus();
+            if (!self.open) return;
+            if (self.activeTab === 'logs') self._renderLiveStatus();
+            else if (self.activeTab === 'settings') self._renderFloorPlanStatus();
         }, 500);
     }
 
@@ -734,7 +1057,9 @@
                 try {
                     logger.noteRawFix({
                         lat: event.latitude, lng: event.longitude,
-                        accuracy: event.accuracy, t: event.timestamp || Date.now()
+                        accuracy: event.accuracy, t: event.timestamp || Date.now(),
+                        heading: event.heading, speed: event.speed,
+                        altitude: event.altitude, altitudeAccuracy: event.altitudeAccuracy
                     });
                 } catch (e) {}
                 return origFound.apply(this, arguments);
@@ -813,6 +1138,7 @@
                 self._sessionId = genSessionId();
                 self._sessionStart = Date.now();
                 self._uploadedThisSession = false;
+                try { logger.noteSessionStart(); } catch (e) {}
                 return origWatch.apply(this, arguments);
             };
         }
@@ -945,6 +1271,34 @@
     // ============================================================
     SimpleLocatePanel.prototype._buildLogsPane = function (pane) {
         var self = this;
+
+        // Cloud upload etiketi (Loglar sekmesi üstü)
+        var uploadBar = document.createElement('div');
+        uploadBar.className = 'slp-upload-bar';
+        var lab = document.createElement('label');
+        lab.setAttribute('for', 'slp-upload-label');
+        lab.textContent = 'Etiket';
+        uploadBar.appendChild(lab);
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        inp.id = 'slp-upload-label';
+        inp.className = 'slp-text';
+        inp.placeholder = 'örn. magaza-A';
+        inp.maxLength = 80;
+        if (!this.autoUpload) this.autoUpload = {};
+        try {
+            var saved = localStorage.getItem('slp-upload-label');
+            if (saved) this.autoUpload.label = saved;
+        } catch (e) {}
+        inp.value = this.autoUpload.label || '';
+        inp.addEventListener('input', function () {
+            var v = inp.value.trim();
+            self.autoUpload.label = v || null;
+            try { localStorage.setItem('slp-upload-label', v); } catch (e2) {}
+        });
+        uploadBar.appendChild(inp);
+        pane.appendChild(uploadBar);
+        this._uploadLabelInput = inp;
 
         // Canlı durum kartı
         this.statusEl = document.createElement('div');
@@ -1097,9 +1451,25 @@
         } else {
             html += '<div class="slp-kv"><span class="k">Yükseklik</span><span class="v" style="color:#64748b">--</span></div>';
         }
+        // Ondülasyon uygulanmamış ham yükseklik (Android'de MSL'den farklıdır) — saha karşılaştırması için
+        if (s.altitudeRaw != null && isFinite(s.altitudeRaw) &&
+            (s.altitude == null || Math.abs(s.altitudeRaw - s.altitude) >= 0.5)) {
+            html += '<div class="slp-kv"><span class="k">Ham yük.</span><span class="v" style="color:#8a7a63">' +
+                s.altitudeRaw.toFixed(1) + ' m' +
+                (s.altitudeGeoid ? ' (N ' + s.altitudeGeoid.toFixed(1) + ')' : '') +
+                '</span></div>';
+        }
         var liveFloor = formatFloorLabel(s.floorName, s.floor);
         if (liveFloor) {
             html += '<div class="slp-kv"><span class="k">Kat</span><span class="v" style="color:#b08d57">' + liveFloor + '</span></div>';
+        }
+        if (s.nearestUnit && s.nearestUnit.id) {
+            var nu = s.nearestUnit;
+            // Ad katmandan türetilmiş tür adıysa hangi birim olduğu kimlikten okunur
+            html += '<div class="slp-kv"><span class="k">En yakın</span><span class="v" style="color:#0e7490">' +
+                escapeHtml(String(nu.name)) +
+                (nu.generic ? ' [' + escapeHtml(String(nu.id)) + ']' : '') +
+                (nu.inside ? ' (içinde)' : ' · ' + nu.distance + ' m') + '</span></div>';
         }
         this.statusEl.innerHTML = html;
     };
@@ -1253,6 +1623,11 @@
             this._buildGeofenceSection(pane);
         }
 
+        // --- Kat planı / en yakın birim (yalnızca yapılandırılmışsa) ---
+        if (typeof ctrl.getFloorPlanIndex === 'function' && ctrl.getFloorPlanIndex()) {
+            this._buildFloorPlanSection(pane);
+        }
+
         // --- Filtre Parametreleri ---
         var fp = this._section(pane, 'Filtre Parametreleri');
         this._number(fp, 'Maks. Doğruluk (m)', o.maxAcceptableAccuracy != null ? o.maxAcceptableAccuracy : 100, 1, 500, 1, function (v) {
@@ -1296,6 +1671,86 @@
             try { this.ctrl.enableFeature(name, v); return; } catch (e) {}
         }
         if (fallback) fallback();
+    };
+
+    // ---- Kat planı bölümü (kat modu + manuel kat + en yakın birim) ----
+    SimpleLocatePanel.prototype._buildFloorPlanSection = function (pane) {
+        var self = this;
+        var ctrl = this.ctrl;
+        var fp = ctrl.getFloorPlanIndex();
+        var sec = this._section(pane, 'Kat Planı / En Yakın Birim');
+
+        var floors = ctrl.getFloorPlanFloors();
+        var options = floors.map(function (f) {
+            return { value: String(f.floor), label: f.name };
+        });
+
+        this._fpSelect = this._select(sec, 'Kat', options,
+            fp.activeFloor != null ? String(fp.activeFloor) : '', function (v) {
+                ctrl.setFloorPlanFloor(parseFloat(v));
+                self._renderFloorPlanStatus();
+            });
+
+        this._fpModeToggle = this._toggle(sec, 'Katı Manuel Seç', fp.floorMode === 'manual', function (v) {
+            ctrl.setFloorPlanMode(v ? 'manual' : 'auto');
+            if (v && self._fpSelect) ctrl.setFloorPlanFloor(parseFloat(self._fpSelect.value));
+            self._renderFloorPlanStatus();
+        });
+
+        var overlayOn = !!(this.options && this.options.floorPlanOverlay);
+        this._fpOverlayToggle = this._toggle(sec, 'Kat planını haritada göster', overlayOn, function (v) {
+            if (self.options) self.options.floorPlanOverlay = v;
+            if (self.options && typeof self.options.onFloorPlanOverlayChange === 'function') {
+                self.options.onFloorPlanOverlayChange(v);
+            }
+        });
+
+        this._fpStatusEl = document.createElement('div');
+        this._fpStatusEl.className = 'slp-hint';
+        sec.appendChild(this._fpStatusEl);
+        this._renderFloorPlanStatus();
+    };
+
+    SimpleLocatePanel.prototype._renderFloorPlanStatus = function () {
+        if (!this._fpStatusEl) return;
+        var ctrl = this.ctrl;
+        var fp = ctrl.getFloorPlanIndex();
+        if (!fp) return;
+
+        var floor = ctrl.getFloorPlanFloor(null);
+        var entry = fp._entry(floor);
+        var lines = [];
+
+        // Listeden kat seçmek modu manuele aldığı için anahtar her çizimde eşitlenir
+        if (this._fpModeToggle) this._fpModeToggle.checked = (fp.floorMode === 'manual');
+
+        if (fp.floorMode === 'auto') {
+            lines.push('Kat otomatik (yükseklikten): <b>' + escapeHtml(entry ? entry.name : '—') + '</b>');
+            // Otomatik moddayken açılır liste yalnızca tespit edileni yansıtır
+            if (this._fpSelect && floor != null) this._fpSelect.value = String(floor);
+        } else {
+            lines.push('Kat elle seçili: <b>' + escapeHtml(entry ? entry.name : '—') + '</b>');
+        }
+
+        if (!entry) {
+            lines.push('Bu kat için plan tanımlı değil.');
+        } else if (entry.state === 'loading') {
+            lines.push('Plan yükleniyor…');
+        } else if (entry.state === 'error') {
+            lines.push('Plan hatası: ' + escapeHtml(entry.error));
+        } else if (entry.state === 'ready') {
+            lines.push(entry.units.length + ' birim yüklü.');
+        } else {
+            lines.push('Plan henüz yüklenmedi.');
+        }
+
+        var nu = ctrl.getNearestUnit();
+        if (nu && nu.id) {
+            lines.push('En yakın: <b>' + escapeHtml(nu.name) + '</b> — ' +
+                (nu.inside ? 'içindesiniz' : nu.distance + ' m'));
+        }
+
+        this._fpStatusEl.innerHTML = lines.join('<br>');
     };
 
     // ---- Geofence bölümü (görünürlük + interaktif çizim) ----
@@ -1636,11 +2091,10 @@
         if (el) el.remove();
     };
 
-    // Otomatik log yükleme — konum durdurulunca çalışır. Sayfa canlı olduğu için
-    // normal fetch (header + boyut sınırı yok) kullanılır. gzip ile sıkıştırılır.
-    // Config (panelOptions.autoUpload):
-    //   { enabled, url, apiKey, table?, label?, compress=true, minEntries=1,
-    //     provider='supabase', headers?, extra? }
+    // Otomatik log yükleme — konum durdurulunca çalışır. gzip ile sıkıştırılır.
+    // Config (panelOptions.autoUpload) — Google Cloud Functions Logs API:
+    //   { enabled, url, apiKey, label?, compress=true, minEntries=1, headers?, extra? }
+    // Headers: Content-Type + x-api-key (DB şifresi client'ta yok).
     SimpleLocatePanel.prototype._autoUploadLogs = function (reason) {
         var cfg = this.autoUpload;
         if (!cfg || cfg.enabled === false) return;
@@ -1663,8 +2117,9 @@
             try { stats = JSON.parse(json).stats || {}; } catch (e) {}
             var row = {
                 session_id: self._sessionId,
-                label: cfg.label || null,
-                device: (navigator.userAgent || '').slice(0, 500),
+                label: (self._uploadLabelInput && self._uploadLabelInput.value.trim())
+                    || cfg.label || null,
+                device: shortDeviceName(navigator.userAgent || ''),
                 platform: /Android/i.test(navigator.userAgent) ? 'android'
                     : (/iPhone|iPad|iPod/i.test(navigator.userAgent) ? 'ios' : 'other'),
                 reason: reason || 'stop',
@@ -1681,9 +2136,7 @@
 
             var headers = {
                 'Content-Type': 'application/json',
-                'apikey': cfg.apiKey,
-                'Authorization': 'Bearer ' + cfg.apiKey,
-                'Prefer': 'return=minimal'
+                'x-api-key': cfg.apiKey
             };
             if (cfg.headers && typeof cfg.headers === 'object') {
                 for (var h in cfg.headers) if (cfg.headers.hasOwnProperty(h)) headers[h] = cfg.headers[h];
@@ -1764,6 +2217,7 @@
         row.appendChild(lab);
         row.appendChild(sw);
         sec.appendChild(row);
+        return input;
     };
 
     SimpleLocatePanel.prototype._range = function (sec, label, initial, min, max, step, onChange) {
@@ -1805,6 +2259,27 @@
         row.appendChild(lab);
         row.appendChild(input);
         sec.appendChild(row);
+    };
+
+    SimpleLocatePanel.prototype._select = function (sec, label, options, initial, onChange) {
+        var row = document.createElement('div');
+        row.className = 'slp-row';
+        var lab = document.createElement('label');
+        lab.textContent = label;
+        var input = document.createElement('select');
+        input.className = 'slp-select';
+        for (var i = 0; i < options.length; i++) {
+            var opt = document.createElement('option');
+            opt.value = options[i].value;
+            opt.textContent = options[i].label;
+            input.appendChild(opt);
+        }
+        if (initial != null) input.value = initial;
+        input.addEventListener('change', function () { onChange(input.value); });
+        row.appendChild(lab);
+        row.appendChild(input);
+        sec.appendChild(row);
+        return input;
     };
 
     SimpleLocatePanel.prototype.destroy = function () {
